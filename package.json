@@ -1,0 +1,61 @@
+{
+  "name": "@local/dsh-custom-provider",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Custom OpenAI-compatible LLM provider for DeepSeek Harness: one ordered candidate list with per-entry baseURL, API key and upstream model, quota-exhaustion day-ban, and transient-failure cooldown failover.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "llm",
+    "provider",
+    "failover"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client/client.js",
+    "./probe": "./probe.js",
+    "./quota": "./src/quota.js",
+    "./health": "./src/health.js",
+    "./openai": "./src/openai.js",
+    "./adapter": "./src/adapter.js",
+    "./config": "./src/config.js",
+    "./normalize": "./src/normalize.js",
+    "./plan": "./src/plan.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "probe.js",
+    "src",
+    "client",
+    "cordis.patch.yml",
+    "icon.svg",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node test/quota.test.mjs && node test/health.test.mjs && node test/openai.test.mjs && node test/plan.test.mjs && node test/failover.test.mjs && node test/client.test.mjs",
+    "test:all": "node test/quota.test.mjs && node test/health.test.mjs && node test/openai.test.mjs && node test/plan.test.mjs && node test/failover.test.mjs && node test/client.test.mjs",
+    "install:profile": "node tools/install.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ]
+    }
+  }
+}

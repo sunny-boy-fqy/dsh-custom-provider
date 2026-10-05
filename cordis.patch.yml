@@ -1,0 +1,25 @@
+# @local/dsh-custom-provider bundle patch: one insert adding the host row.
+#
+# The browser half joins the web plugin graph automatically because
+# package.json declares `dsh.client` and exports "./client".
+#
+# Configure the provider through the GUI (sidebar → 插件 → this row's 配置
+# page) or by hand here. Verified shape:
+#
+#   - id: custom-provider
+#     name: '@local/dsh-custom-provider'
+#     config:
+#       providerId: custom
+#       displayName: 自定义供应商
+#       entries:
+#         - id: primary
+#           name: 主力
+#           baseURL: https://gateway.example/v1
+#           apiKey: sk-...
+#           model: deepseek-v4
+#
+# Re-declaring the row by id (a non-`insert` entry) replaces only the fields it
+# supplies; a new row must live under `insert:`.
+- insert:
+    - id: custom-provider
+      name: '@local/dsh-custom-provider'
