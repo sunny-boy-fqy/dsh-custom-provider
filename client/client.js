@@ -60,6 +60,33 @@ window.__ModuleLoader__.load({
       models: '自定义模型',
       modelsHint: '这里每一个模型就是模型选择器里的一项；它只在自己的候选之间轮换，不会串到别的模型。',
       addModel: '+ 添加模型',
+      reuse: '复用已有模型',
+      reuseHint: '把模型列表里已经能用的模型（官方 DeepSeek、你接入的 OpenRouter、Our Free Model 的免费与白嫖模型等）一键搬进来：请求会交给该路由自己的适配器，端点、密钥、协议都由它负责。',
+      reuseRefresh: '刷新可用模型',
+      reuseRefreshing: '读取中…',
+      reuseFilter: '筛选',
+      reuseFilterHint: '按模型 id 或名称过滤，例如 free。',
+      reuseProvider: '供应方路由',
+      reuseProviderPick: '选择要浏览的路由',
+      reuseModels: '模型',
+      reuseModelsCount: '个模型',
+      reuseImport: '导入',
+      reuseImportAll: '全部导入',
+      reuseImported: '已导入',
+      reuseEmpty: '该路由此刻没有暴露任何模型。',
+      reuseNoCatalog: '还没有读取模型列表：点上面的「刷新可用模型」。',
+      reuseFailed: '以下路由没能返回模型列表：',
+      reuseStale: '以下候选复用的路由当前未挂载：',
+      reuseSelf: '本供应方自己的路由不会出现在这里（复用它会绕回自身）。',
+      reuseImportedNote: '已导入',
+      reuseSkippedNote: '已在列表中，跳过',
+      candidateProvider: '复用路由',
+      candidateProviderDirect: '直连端点',
+      candidateProviderHint: '选一个已注册的路由即成为「复用候选」：此时端点与密钥由该路由决定，下面这些字段不生效。',
+      candidateReuseUpstream: '该路由暴露的模型 id',
+      candidateReuseUpstreamHint: '填该路由自己的模型 id，例如 space-bunny-free 或 deepseek-ai/DeepSeek-V4.1-Flash。',
+      reuseBadge: '复用',
+      directBadge: '直连',
       modelN: '模型',
       modelId: '模型 id',
       modelIdHint: '模型选择器与历史记录里的标识，例如 ds-free；留空由显示名派生。',
@@ -168,6 +195,33 @@ window.__ModuleLoader__.load({
       models: 'Custom models',
       modelsHint: 'Each model here is one entry in the picker, and it rotates only inside its own candidates.',
       addModel: '+ Add model',
+      reuse: 'Reuse an existing model',
+      reuseHint: 'Pull a model that already works — official DeepSeek, your OpenRouter routes, Our Free Model’s free and co-paid models — in one click: the request is handed to that route’s own adapter, which owns the endpoint, the credential and the protocol.',
+      reuseRefresh: 'Refresh available models',
+      reuseRefreshing: 'Reading…',
+      reuseFilter: 'Filter',
+      reuseFilterHint: 'Filter by model id or name, e.g. free.',
+      reuseProvider: 'Provider route',
+      reuseProviderPick: 'Pick a route to browse',
+      reuseModels: 'models',
+      reuseModelsCount: 'models',
+      reuseImport: 'Import',
+      reuseImportAll: 'Import all',
+      reuseImported: 'Imported',
+      reuseEmpty: 'This route advertises no models right now.',
+      reuseNoCatalog: 'Nothing read yet: press “Refresh available models”.',
+      reuseFailed: 'These routes did not return a model list:',
+      reuseStale: 'These candidates reuse a route that is not currently mounted:',
+      reuseSelf: 'This provider’s own route is not offered (reusing it would loop back).',
+      reuseImportedNote: 'imported',
+      reuseSkippedNote: 'already in the list, skipped',
+      candidateProvider: 'Reuse route',
+      candidateProviderDirect: 'Direct endpoint',
+      candidateProviderHint: 'Picking a registered route makes this a reuse candidate: the endpoint and key become that route’s business, and the fields below stop applying.',
+      candidateReuseUpstream: 'Model id that route exposes',
+      candidateReuseUpstreamHint: 'The route’s own model id, e.g. space-bunny-free or deepseek-ai/DeepSeek-V4.1-Flash.',
+      reuseBadge: 'reuse',
+      directBadge: 'direct',
       modelN: 'Model',
       modelId: 'Model id',
       modelIdHint: 'The identity the picker and the session log record, e.g. ds-free.',
@@ -343,6 +397,7 @@ window.__ModuleLoader__.load({
       return {
         id: '',
         name: '',
+        provider: '',
         baseURL: '',
         keyId: '',
         apiKey: '',
@@ -353,6 +408,27 @@ window.__ModuleLoader__.load({
         contextWindow: 0,
         enabled: true,
       };
+    }
+
+    /**
+     * The id a reused model takes in this provider's own list.
+     *
+     * Mirrors the host's `reuseModelId`: the reused id is already the name the
+     * operator knows, so keeping it means one concept has one name. A leading
+     * `org/` path segment is dropped because a slash is not legal here.
+     */
+    function reuseModelId(modelId, fallback) {
+      const parts = String(modelId ?? '').trim().split('/').filter((part) => part.length > 0);
+      const tail = parts.length > 0 ? parts[parts.length - 1] : '';
+      const source = tail.length > 0 ? tail : String(fallback ?? '');
+      return source.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+    }
+
+    /** The candidate id one (route, model) pair takes, matching the host's derivation. */
+    function reuseCandidateId(provider, model) {
+      const slug = reuseModelId(model) || 'model';
+      const route = String(provider ?? '').trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+      return `${route.length > 0 ? route : 'route'}-${slug}`.slice(0, 120);
     }
 
     /** One labelled text field. */
@@ -414,6 +490,15 @@ window.__ModuleLoader__.load({
       const [folded, setFolded] = React.useState({});
       /** Which key-source picker is open, by `model.candidate` slot. */
       const [openPicker, setOpenPicker] = React.useState('');
+      /** The live registry projection: `null` until the first read. */
+      const [catalog, setCatalog] = React.useState(null);
+      const [catalogBusy, setCatalogBusy] = React.useState(false);
+      const [catalogError, setCatalogError] = React.useState('');
+      /** Which reuse route is open in the import panel, and its filter text. */
+      const [reuseOpen, setReuseOpen] = React.useState('');
+      const [reuseFilter, setReuseFilter] = React.useState('');
+      /** Model ids appended by an import in this session: React state is async, this is not. */
+      const appended = React.useRef(new Set());
 
       const refresh = React.useCallback(() => {
         let alive = true;
@@ -564,6 +649,9 @@ window.__ModuleLoader__.load({
         setDraft(pick(state.value));
         setNotice('');
         setHeaderError({});
+        // The draft is gone, so ids appended into it are no longer in the list
+        // and must not keep an import marked as a duplicate.
+        appended.current.clear();
       };
 
       const runProbe = async (modelId, candidateId, label) => {
@@ -598,6 +686,134 @@ window.__ModuleLoader__.load({
         } catch {
           // The next poll shows the real state anyway.
         }
+      };
+
+      /** Read the live registry once: what exists, and what each route serves. */
+      const loadCatalog = async () => {
+        setCatalogBusy(true);
+        setCatalogError('');
+        try {
+          const response = await fetch(`${API}/catalog`, { headers: { accept: 'application/json' } });
+          const payload = await response.json();
+          if (payload.ok !== true) throw new Error(payload.error ?? 'unknown error');
+          setCatalog(payload);
+          const first = Array.isArray(payload.providers) && payload.providers.length > 0 ? payload.providers[0].id : '';
+          setReuseOpen((current) => (current.length > 0 ? current : first));
+        } catch (error) {
+          setCatalogError(error instanceof Error ? error.message : String(error));
+        }
+        setCatalogBusy(false);
+      };
+
+      /**
+       * Every identity an imported row would occupy.
+       *
+       * One helper, used by all three places that ask "is this already here", so
+       * a check cannot drift out of step with the others: the model id, each
+       * candidate id, and each candidate's `route + model` pair. The pair matters
+       * most — a candidate that already reuses the same upstream under a
+       * different id is still the same model to the operator.
+       */
+      const identityKeys = (model) => {
+        const keys = [];
+        if (typeof model.id === 'string' && model.id.length > 0) keys.push(`\u0000model\u0000${model.id}`);
+        for (const candidate of model.candidates ?? []) {
+          if (typeof candidate.id === 'string' && candidate.id.length > 0) keys.push(candidate.id);
+          const provider = typeof candidate.provider === 'string' ? candidate.provider : '';
+          const upstream = typeof candidate.model === 'string' ? candidate.model : '';
+          if (provider.length > 0 && upstream.length > 0) keys.push(`\u0000reuse\u0000${provider}\u0000${upstream}`);
+        }
+        return keys;
+      };
+
+      /** Everything the current draft already serves. */
+      const configured = new Set(draft.models.flatMap(identityKeys));
+
+      /**
+       * Turn one (route, model) pair into a configured model row.
+       *
+       * The imported row mirrors the owning route's own published capacities, so
+       * the picker shows real numbers before the first request rather than
+       * defaults the request would have to correct. The candidate is a *reuse*
+       * candidate: it names the route and the model id and nothing else, because
+       * everything else — endpoint, key, wire protocol — belongs to that route.
+       */
+      const reuseEntry = (provider, model) => {
+        const id = reuseModelId(model.id, model.name);
+        const contextWindow = Number.isFinite(model.contextWindow) && model.contextWindow > 0 ? model.contextWindow : 262144;
+        const maxTokens = Number.isFinite(model.maxTokens) && model.maxTokens > 0 ? model.maxTokens : 32768;
+        return {
+          model: {
+            id,
+            name: model.name || model.id,
+            contextWindow,
+            maxTokens,
+            input: Array.isArray(model.inputModalities) && model.inputModalities.length > 0 ? [...model.inputModalities] : ['text'],
+            candidates: [{
+              ...blankCandidate(),
+              id: reuseCandidateId(provider, model.id),
+              name: model.name || model.id,
+              provider,
+              model: model.id,
+              maxTokens: 0,
+              contextWindow: 0,
+            }],
+            enabled: true,
+          },
+          used: configured.has(id)
+            || configured.has(reuseCandidateId(provider, model.id))
+            || configured.has(`\u0000reuse\u0000${provider}\u0000${model.id}`),
+        };
+      };
+
+      /**
+       * Append models that the *current* draft does not already carry.
+       *
+       * Deduplication happens against the state the updater is actually given,
+       * because two clicks landing in one React batch would both read the same
+       * stale draft and append the same model twice. A ref records what this
+       * session already appended, so a second click is a no-op even before React
+       * has re-rendered — and the *count* comes from that ref, because React runs
+       * the updater later and reading a variable it set would always see the
+       * initial value.
+       */
+      const appendModels = (incoming) => {
+        const fresh = incoming.filter((model) => {
+          const keys = identityKeys(model);
+          if (keys.some((key) => configured.has(key) || appended.current.has(key))) return false;
+          keys.forEach((key) => appended.current.add(key));
+          return true;
+        });
+        if (fresh.length === 0) return 0;
+        setDraft((current) => {
+          const known = new Set(current.models.flatMap(identityKeys));
+          const missing = fresh.filter((model) => !identityKeys(model).some((key) => known.has(key)));
+          return missing.length === 0 ? current : { ...current, models: [...current.models, ...missing] };
+        });
+        return fresh.length;
+      };
+
+      /** Append one imported model, or report that the list already has it. */
+      const importOne = (provider, model) => {
+        const entry = reuseEntry(provider, model);
+        if (entry.used) {
+          setNotice(`${entry.model.id}: ${t('reuseSkippedNote')}`);
+          return false;
+        }
+        const added = appendModels([entry.model]);
+        setNotice(added > 0
+          ? `${entry.model.id}: ${t('reuseImportedNote')}`
+          : `${entry.model.id}: ${t('reuseSkippedNote')}`);
+        return added > 0;
+      };
+
+      /** Append every model of one route that the list does not already have. */
+      const importAll = (group) => {
+        const incoming = (group.models ?? []).map((model) => reuseEntry(group.id, model).model);
+        const added = appendModels(incoming);
+        setNotice(added > 0
+          ? `${group.id}: ${t('reuseImportedNote')} ${added}`
+          : `${group.id}: ${t('reuseSkippedNote')}`);
       };
 
       const readHeaders = (modelIndex, candidateIndex, text) => {
@@ -767,6 +983,95 @@ window.__ModuleLoader__.load({
                   item.model >= 0 ? '：' : ''
                 }${item.field ? `${item.field}: ` : ''}${item.message}`)))),
 
+        // ── reuse an existing model ───────────────────────────────────────
+        // The one thing a two-level editor cannot express on its own is "there
+        // is already a model I can use"; this panel is where the live registry
+        // becomes a row in the list, in one click.
+        h('section', { style: S.section },
+          h('div', { style: S.cardHead },
+            h('strong', null, t('reuse')),
+            h('span', { style: S.grow }),
+            catalog !== null && Array.isArray(catalog.providers)
+              ? h('span', { style: S.hint }, `${catalog.providers.length} ${t('reuseProvider')} · ${catalog.total ?? 0} ${t('reuseModelsCount')}`)
+              : null,
+            h('button', {
+              id: 'cc-reuse-refresh', type: 'button', style: S.small,
+              disabled: !writable || catalogBusy, onClick: loadCatalog,
+            }, catalogBusy ? t('reuseRefreshing') : t('reuseRefresh'))),
+          h('div', { style: S.hint }, t('reuseHint')),
+          h('div', { style: S.hint }, t('reuseSelf')),
+          catalogError.length > 0 ? h('div', { style: S.error }, `${t('reuseRefresh')}: ${catalogError}`) : null,
+          catalog === null
+            ? h('div', { style: S.hint, id: 'cc-reuse-empty' }, t('reuseNoCatalog'))
+            : h('div', { style: S.body },
+                // One route at a time, expanded in place: the page lives inside
+                // the host's own scroll container, so nothing may cover anything.
+                h('div', { style: S.optionList, id: 'cc-reuse-providers' },
+                  (catalog.providers ?? []).length === 0
+                    ? h('div', { style: S.hint }, t('reuseEmpty'))
+                    : (catalog.providers ?? []).map((group, groupIndex) => h('div', { key: `reuse-${groupIndex}` },
+                        h('div', { style: S.cardHead },
+                          h('button', {
+                            id: `cc-reuse-provider-${groupIndex}`, type: 'button', style: S.small,
+                            'aria-expanded': reuseOpen === group.id ? 'true' : 'false',
+                            onClick: () => { setReuseOpen(reuseOpen === group.id ? '' : group.id); setReuseFilter(''); },
+                          }, `${reuseOpen === group.id ? '▼' : '▶'} ${group.name} (${(group.models ?? []).length})`),
+                          h('span', { style: S.grow }),
+                          reuseOpen === group.id
+                            ? h('button', {
+                                id: `cc-reuse-import-all-${groupIndex}`, type: 'button', style: S.small,
+                                disabled: !writable, onClick: () => importAll(group),
+                              }, t('reuseImportAll'))
+                            : null,
+                          h('code', { style: { ...S.hint, ...S.mono } }, group.id)),
+                        reuseOpen === group.id
+                          ? h('div', { style: S.body },
+                              h('input', {
+                                id: `cc-reuse-filter-${groupIndex}`,
+                                style: S.input,
+                                placeholder: t('reuseFilterHint'),
+                                value: reuseFilter,
+                                onChange: (event) => setReuseFilter(event.target.value),
+                              }),
+                              (() => {
+                                const needle = reuseFilter.trim().toLowerCase();
+                                const models = (group.models ?? []).filter((model) =>
+                                  needle.length === 0
+                                  || String(model.id).toLowerCase().includes(needle)
+                                  || String(model.name).toLowerCase().includes(needle));
+                                if (models.length === 0) return h('div', { style: S.hint }, t('reuseEmpty'));
+                                return h('div', { style: S.optionList, id: `cc-reuse-models-${groupIndex}` },
+                                  models.map((model, modelIndex) => {
+                                    const already = reuseEntry(group.id, model).used;
+                                    return h('div', { key: `reuse-model-${modelIndex}`, style: S.line },
+                                      h('code', { style: { ...S.hint, ...S.mono } }, model.id),
+                                      h('span', { style: S.hint }, model.name),
+                                      Number.isFinite(model.contextWindow)
+                                        ? h('span', { style: S.hint }, `ctx ${model.contextWindow}`)
+                                        : null,
+                                      h('span', { style: S.grow }),
+                                      h('button', {
+                                        id: `cc-reuse-import-${groupIndex}-${modelIndex}`,
+                                        type: 'button', style: S.small, disabled: !writable || already,
+                                        onClick: () => importOne(group.id, model),
+                                      }, already ? t('reuseImported') : t('reuseImport')));
+                                  }));
+                              })())
+                          : null)))
+                ,
+                Array.isArray(catalog.failures) && catalog.failures.length > 0
+                  ? h('div', { style: S.warn, id: 'cc-reuse-failures' },
+                      `${t('reuseFailed')} ${catalog.failures.map((item) => `${item.name}(${item.error})`).join('、')}`)
+                  : null)),
+          // Outside the "catalog loaded" branch on purpose: this comes from the
+          // state snapshot, which is read on mount. A candidate borrowing a route
+          // that is gone is the one thing here that is wrong *right now*, so it
+          // must not wait for the operator to press Refresh before it is shown.
+          Array.isArray(server?.staleReuse) && server.staleReuse.length > 0
+            ? h('div', { style: S.warn, id: 'cc-reuse-stale' },
+                `${t('reuseStale')} ${server.staleReuse.map((item) => `${item.model}/${item.candidate} → ${item.provider}`).join('、')}`)
+            : null,
+
         // ── models ────────────────────────────────────────────────────────
         h('section', { style: S.section },
           h('div', { style: S.cardHead },
@@ -868,6 +1173,13 @@ window.__ModuleLoader__.load({
                       }, foldedCandidate ? '▶' : '▼'),
                       h('span', { style: { ...S.chip, ...S.idle } }, `${t('candidateN')} ${candidateIndex + 1}`),
                       candidate.id ? h('code', { style: { ...S.hint, ...S.mono } }, candidate.id) : h('span', { style: S.hint }, t('unsaved')),
+                      // Which mode this candidate is in, at a glance: the two
+                      // modes behave differently enough that reading the card
+                      // must not require opening it.
+                      h('span', {
+                        style: { ...S.chip, ...((candidate.provider ?? '').length > 0 ? S.ok : S.idle) },
+                        id: `cc-${modelIndex}-${candidateIndex}-mode`,
+                      }, (candidate.provider ?? '').length > 0 ? `${t('reuseBadge')} ${candidate.provider}` : t('directBadge')),
                       h(StatusChip, { t, status }),
                       status !== undefined && status.failures > 0
                         ? h('span', { style: S.hint, title: status.detail ?? '' }, `${t('failures')}: ${status.failures}`)
@@ -884,90 +1196,139 @@ window.__ModuleLoader__.load({
                       h('button', { id: `cc-${modelIndex}-${candidateIndex}-remove`, type: 'button', style: S.small, disabled: !writable, onClick: () => removeCandidate(modelIndex, candidateIndex) }, t('remove'))),
 
                     foldedCandidate ? null : h('div', { style: S.body },
-                      // Identity, what it calls and where: one dense row, so the
-                      // key line below sits next to the endpoint it belongs to
-                      // instead of a full-width field away from it.
-                      h('div', { style: S.row },
-                        h(Field, {
-                          id: `cc-${modelIndex}-${candidateIndex}-id`, label: t('candidateId'), mono: true, disabled: !writable,
-                          value: candidate.id ?? '', placeholder: 'modelscope1',
-                          onChange: (value) => patchCandidate(modelIndex, candidateIndex, { id: value }),
-                        }),
-                        h(Field, {
-                          id: `cc-${modelIndex}-${candidateIndex}-model`, label: t('upstreamModel'), mono: true, disabled: !writable,
-                          value: candidate.model ?? '', placeholder: 'deepseek-ai/DeepSeek-V4.1-Flash',
-                          onChange: (value) => patchCandidate(modelIndex, candidateIndex, { model: value }),
-                        }),
-                        h(Field, {
-                          id: `cc-${modelIndex}-${candidateIndex}-url`, label: t('baseURL'), mono: true, disabled: !writable,
-                          style: { ...S.field, flex: '2 1 260px' },
-                          value: candidate.baseURL ?? '', placeholder: 'https://gateway.example/v1',
-                          onChange: (value) => patchCandidate(modelIndex, candidateIndex, { baseURL: value }),
-                        })),
-                      h('div', { style: S.row },
-                        // An in-flow picker, not a native <select>: the page lives
-                        // inside the host's own scroll container, where a native
-                        // popup can be clipped. Options expand the card instead,
-                        // so nothing can cover them.
-                        h('div', { style: { ...S.field, flex: '1 1 170px' } },
-                          h('label', { style: S.label, htmlFor: `cc-${modelIndex}-${candidateIndex}-keyId` }, t('keySource')),
-                          h('button', {
-                            id: `cc-${modelIndex}-${candidateIndex}-keyId`,
-                            type: 'button',
-                            style: S.select,
-                            disabled: !writable,
-                            'aria-expanded': openPicker === slot ? 'true' : 'false',
-                            onClick: () => setOpenPicker(openPicker === slot ? '' : slot),
-                          }, `${keyId.length > 0 ? keyId : t('keyInline')} ▾`),
-                          openPicker === slot
-                            ? h('div', { id: `cc-${modelIndex}-${candidateIndex}-keyId-list`, style: S.optionList },
-                                [{ value: '', label: t('keyInline') }]
-                                  .concat(draft.keys.map((entry, keyIndex) => ({
-                                    value: entry.id ?? '',
-                                    disabled: (entry.id ?? '').length === 0,
-                                    label: `${entry.id || entry.name || `key-${keyIndex + 1}`}${entry.credentialRef ? ` (${t('keyCredential')})` : ''}`,
-                                  })))
-                                  .map((option, optionIndex) => h('button', {
-                                    id: `cc-${modelIndex}-${candidateIndex}-keyId-opt-${optionIndex}`,
-                                    key: `opt-${optionIndex}`,
-                                    type: 'button',
-                                    disabled: option.disabled === true,
-                                    style: option.value === keyId ? S.optionActive : S.option,
-                                    onClick: () => {
-                                      setOpenPicker('');
-                                      patchCandidate(modelIndex, candidateIndex, { keyId: option.value });
-                                    },
-                                  }, option.label)))
-                            : null),
-                        shared
-                          ? h('div', { style: { ...S.field, flex: '2 1 220px' } },
-                              h('span', { style: S.label }, t('keySource')),
-                              h('span', { id: `cc-${modelIndex}-${candidateIndex}-shared`, style: S.ok }, `${t('sharedKeyInUse')}${keyId}`))
-                          : h(Field, {
-                              id: `cc-${modelIndex}-${candidateIndex}-key`, label: t('apiKey'), hint: t('apiKeyHint'), mono: true, type: 'password', disabled: !writable,
-                              value: candidate.apiKey ?? '', onChange: (value) => patchCandidate(modelIndex, candidateIndex, { apiKey: value }),
+                      (() => {
+                        const isReuse = (candidate.provider ?? '').length > 0;
+                        // The reuse-route picker offers every live route plus
+                        // whatever the candidate already names, so a route that
+                        // is currently unmounted still shows instead of being
+                        // silently rewritten to something else on the next save.
+                        const routeOptions = [{ value: '', label: t('candidateProviderDirect') }]
+                          .concat((catalog !== null && Array.isArray(catalog.providers) ? catalog.providers : [])
+                            .map((group) => ({ value: group.id, label: group.name })));
+                        if (isReuse && !routeOptions.some((option) => option.value === candidate.provider)) {
+                          routeOptions.push({ value: candidate.provider, label: `${candidate.provider}${server?.staleReuse?.some((item) => item.provider === candidate.provider) ? ' ⚠' : ''}` });
+                        }
+                        return [
+                          h('div', { key: 'mode', style: S.row },
+                            h('div', { style: { ...S.field, flex: '1 1 220px' } },
+                              h('label', { style: S.label, htmlFor: `cc-${modelIndex}-${candidateIndex}-provider` }, t('candidateProvider')),
+                              h('button', {
+                                id: `cc-${modelIndex}-${candidateIndex}-provider`,
+                                type: 'button',
+                                style: S.select,
+                                disabled: !writable,
+                                'aria-expanded': openPicker === `provider:${slot}` ? 'true' : 'false',
+                                onClick: () => setOpenPicker(openPicker === `provider:${slot}` ? '' : `provider:${slot}`),
+                              }, `${isReuse ? candidate.provider : t('candidateProviderDirect')} ▾`),
+                              openPicker === `provider:${slot}`
+                                ? h('div', { id: `cc-${modelIndex}-${candidateIndex}-provider-list`, style: S.optionList },
+                                    routeOptions.map((option, optionIndex) => h('button', {
+                                      id: `cc-${modelIndex}-${candidateIndex}-provider-opt-${optionIndex}`,
+                                      key: `provider-opt-${optionIndex}`,
+                                      type: 'button',
+                                      style: option.value === (candidate.provider ?? '') ? S.optionActive : S.option,
+                                      onClick: () => {
+                                        setOpenPicker('');
+                                        patchCandidate(modelIndex, candidateIndex, { provider: option.value });
+                                      },
+                                    }, option.label)))
+                                : null,
+                              h('div', { style: S.hint }, t('candidateProviderHint'))),
+                            h(Field, {
+                              id: `cc-${modelIndex}-${candidateIndex}-id`, label: t('candidateId'), mono: true, disabled: !writable,
+                              value: candidate.id ?? '', placeholder: 'modelscope1',
+                              onChange: (value) => patchCandidate(modelIndex, candidateIndex, { id: value }),
                             }),
-                        shared ? null : h(Field, {
-                          id: `cc-${modelIndex}-${candidateIndex}-ref`, label: t('credentialRef'), hint: t('credentialRefHint'), mono: true, disabled: !writable,
-                          value: candidate.credentialRef ?? '', onChange: (value) => patchCandidate(modelIndex, candidateIndex, { credentialRef: value }),
-                        })),
-                      h('div', { style: S.row },
-                        capField(modelIndex, candidateIndex, candidate, 'maxTokens', t('capMaxTokens'), t('capMaxTokensHint')),
-                        capField(modelIndex, candidateIndex, candidate, 'contextWindow', t('capContextWindow'), t('capContextWindowHint')),
-                        h(Toggle, {
-                          id: `cc-${modelIndex}-${candidateIndex}-enabled`, label: t('enabled'), checked: candidate.enabled !== false, disabled: !writable,
-                          onChange: (checked) => patchCandidate(modelIndex, candidateIndex, { enabled: checked }),
-                        })),
-                      h('div', { style: S.field },
-                        h('label', { style: S.label, htmlFor: `cc-${modelIndex}-${candidateIndex}-headers` }, t('moreOptions')),
-                        h('textarea', {
-                          id: `cc-${modelIndex}-${candidateIndex}-headers`,
-                          style: S.textarea,
-                          disabled: !writable,
-                          value: JSON.stringify(candidate.headers ?? {}, null, 2),
-                          onChange: (event) => readHeaders(modelIndex, candidateIndex, event.target.value),
-                        }),
-                        headerError[slot] === true ? h('div', { style: S.error }, t('headersInvalid')) : null)));
+                            h(Field, {
+                              id: `cc-${modelIndex}-${candidateIndex}-model`,
+                              label: isReuse ? t('candidateReuseUpstream') : t('upstreamModel'),
+                              hint: isReuse ? t('candidateReuseUpstreamHint') : undefined,
+                              mono: true, disabled: !writable,
+                              style: { ...S.field, flex: '2 1 260px' },
+                              value: candidate.model ?? '',
+                              placeholder: isReuse ? 'space-bunny-free' : 'deepseek-ai/DeepSeek-V4.1-Flash',
+                              onChange: (value) => patchCandidate(modelIndex, candidateIndex, { model: value }),
+                            })),
+                          isReuse
+                            // A reuse candidate has no endpoint of its own: the
+                            // route owns it. Showing those fields would invite an
+                            // edit that saves and then silently does nothing.
+                            ? h('div', { key: 'reuse-note', style: S.hint, id: `cc-${modelIndex}-${candidateIndex}-reuse-note` },
+                                `${t('reuseBadge')} → ${candidate.provider} · ${candidate.model}`)
+                            : h('div', { key: 'direct', style: S.body },
+                                h('div', { style: S.row },
+                                  h(Field, {
+                                    id: `cc-${modelIndex}-${candidateIndex}-url`, label: t('baseURL'), mono: true, disabled: !writable,
+                                    style: { ...S.field, flex: '2 1 260px' },
+                                    value: candidate.baseURL ?? '', placeholder: 'https://gateway.example/v1',
+                                    onChange: (value) => patchCandidate(modelIndex, candidateIndex, { baseURL: value }),
+                                  })),
+                                h('div', { style: S.row },
+                                  // An in-flow picker, not a native <select>: the page lives
+                                  // inside the host's own scroll container, where a native
+                                  // popup can be clipped. Options expand the card instead,
+                                  // so nothing can cover them.
+                                  h('div', { style: { ...S.field, flex: '1 1 170px' } },
+                                    h('label', { style: S.label, htmlFor: `cc-${modelIndex}-${candidateIndex}-keyId` }, t('keySource')),
+                                    h('button', {
+                                      id: `cc-${modelIndex}-${candidateIndex}-keyId`,
+                                      type: 'button',
+                                      style: S.select,
+                                      disabled: !writable,
+                                      'aria-expanded': openPicker === slot ? 'true' : 'false',
+                                      onClick: () => setOpenPicker(openPicker === slot ? '' : slot),
+                                    }, `${keyId.length > 0 ? keyId : t('keyInline')} ▾`),
+                                    openPicker === slot
+                                      ? h('div', { id: `cc-${modelIndex}-${candidateIndex}-keyId-list`, style: S.optionList },
+                                          [{ value: '', label: t('keyInline') }]
+                                            .concat(draft.keys.map((entry, keyIndex) => ({
+                                              value: entry.id ?? '',
+                                              disabled: (entry.id ?? '').length === 0,
+                                              label: `${entry.id || entry.name || `key-${keyIndex + 1}`}${entry.credentialRef ? ` (${t('keyCredential')})` : ''}`,
+                                            })))
+                                            .map((option, optionIndex) => h('button', {
+                                              id: `cc-${modelIndex}-${candidateIndex}-keyId-opt-${optionIndex}`,
+                                              key: `opt-${optionIndex}`,
+                                              type: 'button',
+                                              disabled: option.disabled === true,
+                                              style: option.value === keyId ? S.optionActive : S.option,
+                                              onClick: () => {
+                                                setOpenPicker('');
+                                                patchCandidate(modelIndex, candidateIndex, { keyId: option.value });
+                                              },
+                                            }, option.label)))
+                                      : null),
+                                  shared
+                                    ? h('div', { style: { ...S.field, flex: '2 1 220px' } },
+                                        h('span', { style: S.label }, t('keySource')),
+                                        h('span', { id: `cc-${modelIndex}-${candidateIndex}-shared`, style: S.ok }, `${t('sharedKeyInUse')}${keyId}`))
+                                    : h(Field, {
+                                        id: `cc-${modelIndex}-${candidateIndex}-key`, label: t('apiKey'), hint: t('apiKeyHint'), mono: true, type: 'password', disabled: !writable,
+                                        value: candidate.apiKey ?? '', onChange: (value) => patchCandidate(modelIndex, candidateIndex, { apiKey: value }),
+                                      }),
+                                  shared ? null : h(Field, {
+                                    id: `cc-${modelIndex}-${candidateIndex}-ref`, label: t('credentialRef'), hint: t('credentialRefHint'), mono: true, disabled: !writable,
+                                    value: candidate.credentialRef ?? '', onChange: (value) => patchCandidate(modelIndex, candidateIndex, { credentialRef: value }),
+                                  })),
+                                h('div', { style: S.field },
+                                  h('label', { style: S.label, htmlFor: `cc-${modelIndex}-${candidateIndex}-headers` }, t('moreOptions')),
+                                  h('textarea', {
+                                    id: `cc-${modelIndex}-${candidateIndex}-headers`,
+                                    style: S.textarea,
+                                    disabled: !writable,
+                                    value: JSON.stringify(candidate.headers ?? {}, null, 2),
+                                    onChange: (event) => readHeaders(modelIndex, candidateIndex, event.target.value),
+                                  }),
+                                  headerError[slot] === true ? h('div', { style: S.error }, t('headersInvalid')) : null)),
+                          h('div', { key: 'caps', style: S.row },
+                            capField(modelIndex, candidateIndex, candidate, 'maxTokens', t('capMaxTokens'), t('capMaxTokensHint')),
+                            capField(modelIndex, candidateIndex, candidate, 'contextWindow', t('capContextWindow'), t('capContextWindowHint')),
+                            h(Toggle, {
+                              id: `cc-${modelIndex}-${candidateIndex}-enabled`, label: t('enabled'), checked: candidate.enabled !== false, disabled: !writable,
+                              onChange: (checked) => patchCandidate(modelIndex, candidateIndex, { enabled: checked }),
+                            })),
+                        ];
+                      })()));
                 })));
           })),
 

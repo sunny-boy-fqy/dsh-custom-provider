@@ -28,6 +28,7 @@
     "./config": "./src/config.js",
     "./normalize": "./src/normalize.js",
     "./plan": "./src/plan.js",
+    "./reuse": "./src/reuse.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
@@ -43,9 +44,9 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node test/quota.test.mjs && node test/health.test.mjs && node test/openai.test.mjs && node test/plan.test.mjs && node test/failover.test.mjs && node test/client.test.mjs",
-    "test:all": "node test/quota.test.mjs && node test/health.test.mjs && node test/openai.test.mjs && node test/plan.test.mjs && node test/failover.test.mjs && node test/client.test.mjs",
-    "install:profile": "node tools/install.mjs"
+    "test": "node test/run.mjs",
+    "test:all": "node test/run.mjs",
+    "test:reuse": "node test/reuse.test.mjs"
   },
   "dsh": {
     "bundle": {

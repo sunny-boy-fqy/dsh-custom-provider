@@ -19,6 +19,8 @@
  * @module @local/dsh-custom-provider/normalize
  */
 
+import { isSelfReuse, validProviderId } from './reuse.js';
+
 /** Context window assumed when a model declares none. */
 export const DEFAULT_CONTEXT_WINDOW = 262_144;
 /** Output-token ceiling assumed when a model declares none. */
@@ -105,12 +107,15 @@ function text(value, fallback = '') {
  * @property {string} id - identifier, unique inside its model.
  * @property {string} key - health key, `modelId/candidateId`.
  * @property {string} name - label used in diagnostics and records.
+ * @property {string} provider - route this candidate delegates to, or `''` when it dials `baseURL` itself.
+ * @property {boolean} reuse - true when the candidate delegates to another route's adapter.
+ * @property {boolean} routeOk - true when a reuse candidate names a usable route (always true for a direct candidate).
  * @property {string} keyId - shared-key entry this candidate reuses, or `''`.
  * @property {boolean} keyResolved - false when `keyId` names nothing.
  * @property {string} baseURL - endpoint, trimmed.
  * @property {string} apiKey - inline key, trimmed.
  * @property {string} credentialRef - credential reference, trimmed.
- * @property {string} model - upstream model id.
+ * @property {string} model - upstream model id, or the reused route's model id.
  * @property {Readonly<Record<string, string>>} headers - extra request headers.
  * @property {number | undefined} maxTokens - this endpoint's own output ceiling.
  * @property {number | undefined} contextWindow - this endpoint's own context window.
@@ -158,14 +163,19 @@ function text(value, fallback = '') {
 /**
  * Does this candidate have everything a request needs?
  *
+ * The two modes have different requirements, and conflating them is exactly how
+ * a reuse candidate would be silently dropped for "missing an endpoint" it was
+ * never meant to have: a **reuse** candidate needs a route and a model id and
+ * nothing else, while a **direct** candidate needs an endpoint and a model id.
+ *
  * @param {NormalizedCandidate} candidate - the candidate.
- * @returns {boolean} true when it is enabled, addressed, named and its key (if any) resolved.
+ * @returns {boolean} true when it is enabled and carries what its mode requires.
  */
 export function usableCandidate(candidate) {
-  return candidate.enabled
-    && candidate.keyResolved !== false
-    && candidate.baseURL.length > 0
-    && candidate.model.length > 0;
+  if (!candidate.enabled) return false;
+  if (candidate.model.length === 0) return false;
+  if (candidate.reuse) return candidate.routeOk === true;
+  return candidate.keyResolved !== false && candidate.baseURL.length > 0;
 }
 
 /**
@@ -249,20 +259,29 @@ function uniqueId(candidateId, taken) {
 /**
  * Normalize one candidate.
  *
+ * A candidate is normalized into exactly one of the two modes, decided by
+ * `provider` alone, and the mode then decides which findings apply: a reuse
+ * candidate is never told it is missing an endpoint, and a direct candidate is
+ * never asked for a route. Every field both modes share is normalized the same
+ * way, so the adapter can treat them uniformly.
+ *
  * @param {unknown} value - the raw candidate.
  * @param {number} index - its position in the model.
  * @param {string} modelId - the owning model's id, for the health key.
  * @param {Set<string>} taken - candidate ids already used in this model.
  * @param {Map<string, NormalizedKey>} keyMap - the shared key library by id.
  * @param {Diagnostic[]} diagnostics - collected findings.
+ * @param {string} [ownProvider] - this provider's route id, to refuse self-reuse.
  * @returns {NormalizedCandidate} the candidate.
  */
-function normalizeCandidate(value, index, modelId, taken, keyMap, diagnostics) {
+function normalizeCandidate(value, index, modelId, taken, keyMap, diagnostics, ownProvider = '') {
   const source = value !== null && typeof value === 'object' ? value : {};
   const upstream = text(source.model);
   const name = text(source.name);
   const baseURL = text(source.baseURL);
   const keyId = text(source.keyId);
+  const provider = text(source.provider);
+  const reuse = provider.length > 0;
 
   const requested = text(source.id);
   const derived = requested.length > 0 ? requested : slugify(name) || slugify(upstream) || `candidate-${index + 1}`;
@@ -279,9 +298,10 @@ function normalizeCandidate(value, index, modelId, taken, keyMap, diagnostics) {
 
   // A candidate either names a shared key or carries its own. Resolution happens
   // here, once, so every consumer downstream sees the same two fields and the
-  // adapter never has to know the library exists.
-  const shared = keyId.length > 0 ? keyMap.get(keyId) : undefined;
-  const keyResolved = keyId.length === 0 || shared !== undefined;
+  // adapter never has to know the library exists. A reuse candidate borrows its
+  // route's own credential path, so the library is deliberately not consulted.
+  const shared = !reuse && keyId.length > 0 ? keyMap.get(keyId) : undefined;
+  const keyResolved = reuse || keyId.length === 0 || shared !== undefined;
   if (!keyResolved) {
     diagnostics.push({
       model: -1,
@@ -295,32 +315,76 @@ function normalizeCandidate(value, index, modelId, taken, keyMap, diagnostics) {
   const credentialRef = shared !== undefined ? shared.credentialRef : text(source.credentialRef);
 
   const enabled = source.enabled !== false;
+  // A reuse candidate is only usable when its route is a legal, non-self id:
+  // delegating to a route that cannot exist, or back into this very cascade,
+  // would fail on every attempt while looking perfectly configured.
+  const routeOk = !reuse || (validProviderId(provider) && !isSelfReuse(provider, ownProvider));
   if (enabled) {
-    if (baseURL.length === 0) {
-      diagnostics.push({ model: -1, candidate: index, field: 'baseURL', severity: 'error', message: `候选 "${id}" 缺少端点地址` });
-    } else if (!validEndpoint(baseURL)) {
-      diagnostics.push({
-        model: -1,
-        candidate: index,
-        field: 'baseURL',
-        severity: 'error',
-        message: `候选 "${id}" 的端点不是合法的 http(s) 地址：${baseURL}`,
-      });
-    }
-    if (upstream.length === 0) {
-      diagnostics.push({ model: -1, candidate: index, field: 'model', severity: 'error', message: `候选 "${id}" 缺少上游模型名` });
-    }
-    if (apiKey.length === 0 && credentialRef.length === 0) {
-      diagnostics.push({ model: -1, candidate: index, field: 'apiKey', severity: 'warning', message: `候选 "${id}" 未配置密钥：将以无鉴权方式请求` });
-    }
-    if (apiKey.length > 0 && credentialRef.length > 0) {
-      diagnostics.push({
-        model: -1,
-        candidate: index,
-        field: 'credentialRef',
-        severity: 'warning',
-        message: `候选 "${id}" 同时配置了明文 key 与凭据引用，将使用凭据引用`,
-      });
+    if (reuse) {
+      if (!validProviderId(provider)) {
+        diagnostics.push({
+          model: -1,
+          candidate: index,
+          field: 'provider',
+          severity: 'error',
+          message: `候选 "${id}" 的复用路由 id 不合法：${provider}（只能用小写字母、数字、点、下划线和连字符）`,
+        });
+      } else if (isSelfReuse(provider, ownProvider)) {
+        diagnostics.push({
+          model: -1,
+          candidate: index,
+          field: 'provider',
+          severity: 'error',
+          message: `候选 "${id}" 复用本供应方自己的路由 "${provider}"，会绕回自身`,
+        });
+      }
+      if (upstream.length === 0) {
+        diagnostics.push({
+          model: -1,
+          candidate: index,
+          field: 'model',
+          severity: 'error',
+          message: `候选 "${id}" 是复用候选，但没填该路由暴露的模型 id`,
+        });
+      }
+      // Endpoint and key belong to the owning adapter; a stale copy here would
+      // only mislead whoever reads the page next.
+      if (baseURL.length > 0 || apiKey.length > 0 || credentialRef.length > 0 || keyId.length > 0) {
+        diagnostics.push({
+          model: -1,
+          candidate: index,
+          field: 'provider',
+          severity: 'warning',
+          message: `候选 "${id}" 是复用候选，端点/密钥/凭据字段不生效（由路由 "${provider}" 自己决定）`,
+        });
+      }
+    } else {
+      if (baseURL.length === 0) {
+        diagnostics.push({ model: -1, candidate: index, field: 'baseURL', severity: 'error', message: `候选 "${id}" 缺少端点地址` });
+      } else if (!validEndpoint(baseURL)) {
+        diagnostics.push({
+          model: -1,
+          candidate: index,
+          field: 'baseURL',
+          severity: 'error',
+          message: `候选 "${id}" 的端点不是合法的 http(s) 地址：${baseURL}`,
+        });
+      }
+      if (upstream.length === 0) {
+        diagnostics.push({ model: -1, candidate: index, field: 'model', severity: 'error', message: `候选 "${id}" 缺少上游模型名` });
+      }
+      if (apiKey.length === 0 && credentialRef.length === 0) {
+        diagnostics.push({ model: -1, candidate: index, field: 'apiKey', severity: 'warning', message: `候选 "${id}" 未配置密钥：将以无鉴权方式请求` });
+      }
+      if (apiKey.length > 0 && credentialRef.length > 0) {
+        diagnostics.push({
+          model: -1,
+          candidate: index,
+          field: 'credentialRef',
+          severity: 'warning',
+          message: `候选 "${id}" 同时配置了明文 key 与凭据引用，将使用凭据引用`,
+        });
+      }
     }
   }
 
@@ -328,6 +392,9 @@ function normalizeCandidate(value, index, modelId, taken, keyMap, diagnostics) {
     id,
     key: `${modelId}/${id}`,
     name: name.length > 0 ? name : upstream.length > 0 ? upstream : id,
+    provider,
+    reuse,
+    routeOk,
     keyId,
     keyResolved,
     baseURL,
@@ -350,9 +417,10 @@ function normalizeCandidate(value, index, modelId, taken, keyMap, diagnostics) {
  * @param {Set<string>} taken - model ids already used.
  * @param {Map<string, NormalizedKey>} keyMap - the shared key library by id.
  * @param {Diagnostic[]} diagnostics - collected findings.
+ * @param {string} [ownProvider] - this provider's route id, to refuse self-reuse.
  * @returns {NormalizedModel} the model.
  */
-function normalizeModel(value, index, taken, keyMap, diagnostics) {
+function normalizeModel(value, index, taken, keyMap, diagnostics, ownProvider = '') {
   const source = value !== null && typeof value === 'object' ? value : {};
   const name = text(source.name);
   const requested = text(source.id);
@@ -372,7 +440,7 @@ function normalizeModel(value, index, taken, keyMap, diagnostics) {
   const candidateIds = new Set();
   const rawCandidates = Array.isArray(source.candidates) ? source.candidates : [];
   const candidates = rawCandidates.map((candidate, position) =>
-    normalizeCandidate(candidate, position, id, candidateIds, keyMap, diagnostics),
+    normalizeCandidate(candidate, position, id, candidateIds, keyMap, diagnostics, ownProvider),
   );
   // Findings raised while normalizing candidates are attributed to this model.
   for (let cursor = startedAt; cursor < diagnostics.length; cursor += 1) {
@@ -466,7 +534,7 @@ export function normalizeConfig(raw) {
   const modelIds = new Set();
   const keys = normalizeKeys(source.keys, diagnostics);
   const keyMap = new Map(keys.map((key) => [key.id, key]));
-  const models = rawModels.map((model, index) => normalizeModel(model, index, modelIds, keyMap, diagnostics));
+  const models = rawModels.map((model, index) => normalizeModel(model, index, modelIds, keyMap, diagnostics, providerId));
   const usableModels = models.filter(usableModel);
 
   const cooldownMinutes = Number(source.cooldownMinutes);
@@ -516,12 +584,20 @@ export function errorsOf(config) {
  * caller that asks for more anyway.
  *
  * @param {NormalizedModel} model - the model.
+ * @param {(candidate: NormalizedCandidate) => { contextWindow?: number, maxTokens?: number } | undefined} [liveCapability] - the reused route's own published capacity for one candidate, when it is known.
  * @returns {{ maxTokens: number, contextWindow: number }} the effective limits.
  */
-export function effectiveLimits(model) {
+export function effectiveLimits(model, liveCapability) {
   const pool = model.usableCandidates.length > 0 ? model.usableCandidates : model.candidates;
-  const outputCaps = pool.map((candidate) => candidate.maxTokens).filter((value) => value !== undefined);
-  const windows = pool.map((candidate) => candidate.contextWindow).filter((value) => value !== undefined);
+  /** What each candidate actually accepts: its own declared cap, or the reused route's. */
+  const capOf = (candidate, field) => {
+    if (candidate[field] !== undefined) return candidate[field];
+    if (!candidate.reuse || typeof liveCapability !== 'function') return undefined;
+    const live = liveCapability(candidate);
+    return live === undefined ? undefined : live[field];
+  };
+  const outputCaps = pool.map((candidate) => capOf(candidate, 'maxTokens')).filter((value) => value !== undefined);
+  const windows = pool.map((candidate) => capOf(candidate, 'contextWindow')).filter((value) => value !== undefined);
   return {
     maxTokens: outputCaps.length > 0 ? Math.min(model.maxTokens, ...outputCaps) : model.maxTokens,
     contextWindow: windows.length > 0 ? Math.min(model.contextWindow, ...windows) : model.contextWindow,
@@ -569,6 +645,51 @@ export function modelsOf(config) {
     description: `${model.candidates.length} 个候选 · ${model.usableCandidates.map((candidate) => candidate.model).join(' / ')}`,
     inputModalities: [...model.input],
   }));
+}
+
+/**
+ * Every distinct route the configuration currently borrows from.
+ *
+ * The Live catalog endpoint lists the routes that exist regardless, but knowing
+ * which ones a candidate actually names is what lets diagnostics — and the
+ * configuration page — say "this route is gone" instead of leaving the operator
+ * to compare two lists by eye.
+ *
+ * @param {NormalizedConfig} config - the normalized config.
+ * @returns {string[]} distinct reuse route ids, in configuration order.
+ */
+export function reusedProviders(config) {
+  const seen = new Set();
+  /** @type {string[]} */
+  const routes = [];
+  for (const model of config.models) {
+    for (const candidate of model.candidates) {
+      if (!candidate.reuse || seen.has(candidate.provider)) continue;
+      seen.add(candidate.provider);
+      routes.push(candidate.provider);
+    }
+  }
+  return routes;
+}
+
+/**
+ * Reuse candidates whose route did not answer the live registry.
+ *
+ * @param {NormalizedConfig} config - the normalized config.
+ * @param {Iterable<string>} missingRoutes - routes the live registry does not list.
+ * @returns {Array<{ model: string, candidate: string, provider: string, model_: string }>} the stale pairs, as `model/candidate` plus what it wanted.
+ */
+export function staleReuses(config, missingRoutes) {
+  const missing = new Set(missingRoutes);
+  /** @type {Array<{ model: string, candidate: string, provider: string, wanted: string }>} */
+  const stale = [];
+  for (const model of config.models) {
+    for (const candidate of model.candidates) {
+      if (!candidate.reuse || !missing.has(candidate.provider)) continue;
+      stale.push({ model: model.id, candidate: candidate.id, provider: candidate.provider, wanted: candidate.model });
+    }
+  }
+  return stale;
 }
 
 /**

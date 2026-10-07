@@ -30,6 +30,12 @@ import {
 } from './normalize.js';
 
 /**
+ * Re-exported so the browser half can build a candidate that reuses a route
+ * without duplicating the id derivation on the client side.
+ */
+export { reuseCandidateId, reuseModelId } from './reuse.js';
+
+/**
  * One entry of the provider-level shared key library.
  *
  * A key pasted once and referenced by several candidates: rotating it is one
@@ -46,18 +52,29 @@ export const KeyConfig = z.object({
 /**
  * One candidate: one way to serve the model it belongs to.
  *
- * `baseURL`, a key and `model` are the whole point — a model's candidates differ
- * precisely in where they go and what they call.
+ * A candidate is served one of two ways, and `provider` selects between them:
+ *
+ * - **Reuse** (`provider` non-empty): the request is delegated to another
+ *   registered route's adapter. `model` then names a model *that route*
+ *   advertises, and `baseURL`/`apiKey`/`credentialRef`/`headers` are ignored —
+ *   the owning adapter already knows its endpoint and its credential.
+ * - **Direct** (`provider` empty): this plugin speaks OpenAI Chat Completions to
+ *   `baseURL` itself, with the key the candidate names.
+ *
+ * The two modes share `id`, `name`, `model`, the capacity caps and `enabled`, so
+ * a model's list can mix them freely and the rotation does not care which is
+ * which.
  */
 export const CandidateConfig = z.object({
   id: z.string().default('').description('候选标识（同一模型内唯一）：健康记录与日志用它区分候选；留空自动生成。'),
   name: z.string().default('').description('候选显示名，例如 modelscope1。'),
-  baseURL: z.string().default('').description('该候选的端点，例如 https://gateway.example/v1；已含 /chat/completions 时原样使用。'),
-  keyId: z.string().default('').description('复用「共享密钥」里的某一条；留空则用下面的内联密钥。'),
-  apiKey: z.string().default('').description('明文 API Key；与凭据引用二选一。'),
-  credentialRef: z.string().default('').description('DSH 凭据引用名（大写字母、数字、下划线）；非空时优先于明文 apiKey。'),
-  model: z.string().default('').description('该候选真实调用的上游模型名，例如 DeepSeek-V4.1-Flash。'),
-  headers: z.dict(z.string()).default({}).description('附加请求头，例如网关要求的 x-api-key。'),
+  provider: z.string().default('').description('复用模型：填已注册的供应方路由 id（如 deepseek-official、openrouter-free、our-free-model），请求将交给该路由自己的适配器；留空 = 直连下面的端点。'),
+  baseURL: z.string().default('').description('该候选的端点，例如 https://gateway.example/v1；已含 /chat/completions 时原样使用。复用候选忽略此项。'),
+  keyId: z.string().default('').description('复用「共享密钥」里的某一条；留空则用下面的内联密钥。复用候选忽略此项。'),
+  apiKey: z.string().default('').description('明文 API Key；与凭据引用二选一。复用候选忽略此项。'),
+  credentialRef: z.string().default('').description('DSH 凭据引用名（大写字母、数字、下划线）；非空时优先于明文 apiKey。复用候选忽略此项。'),
+  model: z.string().default('').description('直连时 = 上游模型名，例如 DeepSeek-V4.1-Flash；复用（provider 非空）时 = 该路由暴露的模型 id，例如 space-bunny-free。'),
+  headers: z.dict(z.string()).default({}).description('附加请求头，例如网关要求的 x-api-key。复用候选忽略此项。'),
   maxTokens: z.number().default(0).description('该端点的输出上限；0 = 跟随模型设置。设置后实际发送的 max_tokens 不会超过它（各中转站上限不同，必须逐候选声明）。'),
   contextWindow: z.number().default(0).description('该端点的上下文窗口；0 = 跟随模型设置。声明后模型对外上报的窗口取各候选的最小值。'),
   enabled: z.boolean().default(true).description('关闭后该候选不参与轮换。'),
@@ -129,6 +146,8 @@ export {
   modelsOf,
   normalizeConfig,
   normalizeKeys,
+  reusedProviders,
+  staleReuses,
   usableCandidate,
   usableModel,
 } from './normalize.js';

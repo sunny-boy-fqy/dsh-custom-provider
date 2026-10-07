@@ -20,7 +20,8 @@
  */
 
 import { CustomProviderAdapter } from './src/adapter.js';
-import { healthKeys, modelsOf, normalizeConfig } from './src/normalize.js';
+import { healthKeys, modelsOf, normalizeConfig, reusedProviders, staleReuses } from './src/normalize.js';
+import { buildCatalogView } from './src/reuse.js';
 import { HealthStore, defaultStatePath } from './src/health.js';
 import { buildChatCompletionsUrl } from './src/openai.js';
 
@@ -203,6 +204,17 @@ export function apply(ctx, config) {
     readImage: (ref, target, signal) => ctx.get('attachments')?.readImageRequest(ref, target, signal),
     attribution,
     makeError: errorFactory(),
+    // Reuse: hand the call to the route that already serves it. Resolved live
+    // from the registry rather than captured at mount, because a route can be
+    // registered after this plugin and re-registered during a session; and
+    // refused when it names this very route, which would recurse.
+    streamVia: (provider, model, options) => {
+      if (provider === readConfig().providerId) {
+        throw errorFactory()(`自定义供应商：候选路由 "${provider}" 指向本供应方自身，无法复用`, 'REUSE_SELF');
+      }
+      return ctx.llm.stream({ ...options, provider, model });
+    },
+    resolveVia: (provider, model, signal) => ctx.llm.resolveModelInfo(provider, model, signal),
     // A rotation is invisible in the answer, so it is announced where an
     // operator looks: the Harness log now, and the configuration page later.
     onRotation: (record, _model, from, to) => {
@@ -297,6 +309,25 @@ export function apply(ctx, config) {
   };
 
   /**
+   * Reuse candidates whose route is not mounted right now.
+   *
+   * This can only be answered against the live registry, which is why it lives
+   * here rather than in the pure normalizer: the configuration is not wrong —
+   * the route simply is not there *yet*, or is gone. Either way the request
+   * would fail on every attempt, so the configuration page says so up front
+   * instead of leaving the operator to infer it from a failed turn.
+   *
+   * @param {import('./src/normalize.js').NormalizedConfig} config - the normalized config.
+   * @returns {Array<{ model: string, candidate: string, provider: string, wanted: string }>} the stale pairs.
+   */
+  const staleReuse = (config) => {
+    const routes = new Set(reusedProviders(config));
+    if (routes.size === 0) return [];
+    const mounted = new Set(ctx.llm.listProviders().map((provider) => provider.id));
+    return staleReuses(config, [...routes].filter((route) => !mounted.has(route)));
+  };
+
+  /**
    * The snapshot the browser half reads: every model with its candidates' live
    * health, plus configuration diagnostics and the route's real state.
    *
@@ -313,6 +344,7 @@ export function apply(ctx, config) {
       providerId: current.providerId,
       displayName: current.displayName,
       diagnostics: current.diagnostics,
+      staleReuse: staleReuse(current),
       healthPath: health.path,
       lastRotation: health.lastRotation() ?? null,
       keyIds: current.keys.map((key) => ({ id: key.id, name: key.name, credential: key.credentialRef.length > 0 })),
@@ -328,6 +360,8 @@ export function apply(ctx, config) {
           name: candidate.name,
           enabled: candidate.enabled,
           index: candidate.index,
+          provider: candidate.provider,
+          reuse: candidate.reuse,
           status: health.status(candidate.key, at),
         })),
       })),
@@ -337,10 +371,51 @@ export function apply(ctx, config) {
   /**
    * Ask one candidate's endpoint what models it advertises.
    *
+   * A reuse candidate has no endpoint of its own to interrogate, so the question
+   * becomes the more useful one: does the route it borrows still exist, and does
+   * it still advertise the model the candidate names? Answering from the live
+   * registry is exactly what an operator wants to know before blaming a key.
+   *
    * @param {import('./src/normalize.js').NormalizedCandidate} candidate - the candidate.
    * @returns {Promise<object>} a small diagnostic result.
    */
   const probe = async (candidate) => {
+    if (candidate.reuse) {
+      const providers = ctx.llm.listProviders();
+      const known = providers.find((provider) => provider.id === candidate.provider);
+      if (known === undefined) {
+        return {
+          ok: false,
+          detail: `复用路由 "${candidate.provider}" 未挂载（当前已注册：${providers.map((provider) => provider.id).join('、') || '无'}）`,
+          mounted: false,
+        };
+      }
+      const models = await ctx.llm.listModels(candidate.provider).catch((error) => {
+        // The route exists but could not answer. That is a different problem
+        // from a missing route — the fix is on the other provider, not here —
+        // so it is reported as such instead of collapsing into one message.
+        return { error: error instanceof Error ? error.message : String(error) };
+      });
+      if (!Array.isArray(models)) {
+        return {
+          ok: false,
+          mounted: true,
+          detail: `路由 "${candidate.provider}" 已挂载，但读取模型列表失败：${models.error}`,
+        };
+      }
+      const ids = models.map((model) => model.id);
+      const found = ids.includes(candidate.model);
+      return {
+        ok: found,
+        mounted: true,
+        status: 200,
+        count: ids.length,
+        sample: ids.slice(0, 40),
+        detail: found
+          ? undefined
+          : `路由 "${candidate.provider}" 已挂载，但没有暴露模型 "${candidate.model}"`,
+      };
+    }
     const key = await adapter.keyFor(candidate);
     const url = new URL(buildChatCompletionsUrl(candidate.baseURL));
     url.pathname = url.pathname.replace(/\/chat\/completions$/u, '/models');
@@ -367,6 +442,43 @@ export function apply(ctx, config) {
       .map((item) => (typeof item?.id === 'string' ? item.id : typeof item === 'string' ? item : undefined))
       .filter((id) => typeof id === 'string');
     return { ok: true, status: response.status, count: ids.length, sample: ids.slice(0, 40) };
+  };
+
+  /**
+   * Every route the registry currently serves, with the models it advertises.
+   *
+   * This is the answer to "let me reuse a model that already exists": the
+   * browser half cannot reach `ctx.llm`, so the Host half projects the live
+   * registry for it. Each model carries the capacities the owning adapter
+   * publishes, so an import can fill the new model row with real numbers
+   * instead of defaults the first request would have to correct.
+   *
+   * Costs are bounded deliberately: one `listModels` per route, no
+   * `resolveModelInfo` per model — the cheap listing is enough to choose from,
+   * and the per-model capacity is resolved lazily by the adapter once the model
+   * is actually used.
+   *
+   * @returns {Promise<object>} the catalog payload, with per-route failures kept beside the groups.
+   */
+  const liveCatalog = async () => {
+    const own = readConfig().providerId;
+    const providers = ctx.llm.listProviders();
+    /** @type {Map<string, { models?: readonly object[], error?: string }>} */
+    const listed = new Map();
+    await Promise.all(providers.map(async (provider) => {
+      try {
+        const models = await ctx.llm.listModels(provider.id);
+        listed.set(provider.id, { models });
+      } catch (error) {
+        listed.set(provider.id, { error: error instanceof Error ? error.message : String(error) });
+      }
+    }));
+    return {
+      ok: true,
+      self: own,
+      reused: reusedProviders(readConfig()),
+      ...buildCatalogView({ providers, listed, self: own }),
+    };
   };
 
   ctx.inject(['webServer'], (child) => {
@@ -396,6 +508,19 @@ export function apply(ctx, config) {
             const key = typeof body.key === 'string' ? body.key : '';
             const cleared = key.length > 0 ? (health.clear(key) ? 1 : 0) : health.clearAll();
             return json(res, 200, { ok: true, cleared, state: statePayload() });
+          },
+        }),
+        child.webServer.register({
+          kind: 'exact',
+          path: `${API_PREFIX}/catalog`,
+          handler: async (req, res) => {
+            if (!isSameOrigin(req)) return json(res, 403, { ok: false, error: 'cross-site request rejected' });
+            if (req.method !== 'GET') return json(res, 405, { ok: false, error: 'method not allowed' });
+            try {
+              return json(res, 200, await liveCatalog());
+            } catch (error) {
+              return json(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) });
+            }
           },
         }),
         child.webServer.register({

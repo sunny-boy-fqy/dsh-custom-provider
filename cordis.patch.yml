@@ -11,12 +11,23 @@
 #     config:
 #       providerId: custom
 #       displayName: 自定义供应商
-#       entries:
-#         - id: primary
-#           name: 主力
-#           baseURL: https://gateway.example/v1
-#           apiKey: sk-...
-#           model: deepseek-v4
+#       models:
+#         - id: ds-free
+#           name: DS Free
+#           candidates:
+#             # Direct: this plugin dials the endpoint itself.
+#             - id: primary
+#               baseURL: https://gateway.example/v1
+#               apiKey: sk-...
+#               model: deepseek-v4
+#             # Reuse: handed to a route that is already registered. `model` is
+#             # that route's own model id; the endpoint and key belong to it.
+#             - id: our-free-model-space-bunny-free
+#               provider: our-free-model
+#               model: space-bunny-free
+#
+# A candidate with no `provider` means "direct", so a configuration written
+# before reuse existed keeps its exact meaning.
 #
 # Re-declaring the row by id (a non-`insert` entry) replaces only the fields it
 # supplies; a new row must live under `insert:`.

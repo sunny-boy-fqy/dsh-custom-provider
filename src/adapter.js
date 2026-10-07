@@ -28,6 +28,7 @@ import { attemptMaxTokens, effectiveLimits, modelOf, modelsOf } from './normaliz
 import { ProviderFailureError, streamChatCompletion } from './openai.js';
 import { describePlan, planAttempts } from './plan.js';
 import { classifyIncompleteStream } from './quota.js';
+import { classifyDelegatedFailure } from './reuse.js';
 
 /**
  * Retry policy reported for every route: the cascade is the retry mechanism.
@@ -241,6 +242,8 @@ export class CustomProviderAdapter {
    * @param {(message: string, code: string) => Error} [options.makeError] - error constructor.
    * @param {typeof streamChatCompletion} [options.streamImpl] - stream client, injectable for tests.
    * @param {(record: object, model: object, from: object, to: object) => void} [options.onRotation] - told when a model degrades.
+   * @param {(provider: string, model: string, options: any, signal?: AbortSignal) => AsyncIterable<object>} [options.streamVia] - stream one call through another registered route's adapter, for reuse candidates.
+   * @param {(provider: string, model: string, signal?: AbortSignal) => Promise<object>} [options.resolveVia] - resolve one reused route's model metadata.
    */
   constructor(options) {
     this.readConfig = options.readConfig;
@@ -251,6 +254,10 @@ export class CustomProviderAdapter {
     this.makeError = options.makeError ?? defaultMakeError;
     this.streamImpl = options.streamImpl ?? streamChatCompletion;
     this.onRotation = options.onRotation;
+    this.streamVia = options.streamVia;
+    this.resolveVia = options.resolveVia;
+    /** Live capacities per logical model id, filled by {@link CustomProviderAdapter#resolveModel}. */
+    this.liveCaps = new Map();
   }
 
   /** @returns {import('./normalize.js').NormalizedConfig} the current configuration. */
@@ -297,18 +304,24 @@ export class CustomProviderAdapter {
    *
    * @param {string} provider - the registered route id.
    * @param {string} model - the model id.
+   * @param {AbortSignal} [signal] - cancellation for reused-route lookups.
    * @returns {Promise<object>} resolved model metadata.
    * @throws {Error} when the id is not a usable model.
    */
-  async resolveModel(provider, model) {
+  async resolveModel(provider, model, signal) {
     const resolved = modelOf(this.config(), model);
     if (resolved === undefined) {
       throw this.makeError(`自定义供应商：模型 "${model}" 不在可用列表里（可能已删除、停用或候选都没填完整）`, 'UNKNOWN_MODEL');
     }
+    // A reused candidate's real capacity belongs to the route serving it and is
+    // only knowable by asking that route. Asking is a local registry call, not
+    // network I/O, and a route that cannot answer degrades to the configured
+    // numbers rather than failing the request.
+    const live = await this.liveCapabilities(resolved, signal);
     // Report the *effective* capability: the smallest ceiling any usable
     // candidate accepts. Reporting the model's own numbers would let the
     // harness pick a default the fallback endpoint then refuses.
-    const limits = effectiveLimits(resolved);
+    const limits = effectiveLimits(resolved, live);
     return {
       provider,
       id: resolved.id,
@@ -317,6 +330,59 @@ export class CustomProviderAdapter {
       defaultMaxTokens: limits.maxTokens,
       inputModalities: [...resolved.input],
     };
+  }
+
+  /**
+   * Ask each reused route what it says about the model it is being asked to serve.
+   *
+   * The answer is kept per logical model id, so the per-attempt clamp in
+   * {@link CustomProviderAdapter#attemptReuse} can apply the same ceiling the
+   * caller was told about. `resolveModel` always runs before dispatch on the real
+   * runtime path, so the entry is there when an attempt needs it; an attempt that
+   * somehow runs first simply falls back to the configured numbers.
+   *
+   * @param {import('./normalize.js').NormalizedModel} model - the logical model.
+   * @param {AbortSignal} [signal] - cancellation.
+   * @returns {Promise<(candidate: import('./normalize.js').NormalizedCandidate) => ({ contextWindow?: number, maxTokens?: number } | undefined)>} the lookup.
+   */
+  async liveCapabilities(model, signal) {
+    /** @type {Map<string, { contextWindow?: number, maxTokens?: number } | undefined>} */
+    const found = new Map();
+    if (typeof this.resolveVia === 'function') {
+      const wanted = new Map();
+      for (const candidate of model.usableCandidates) {
+        if (candidate.reuse) wanted.set(`${candidate.provider}\u0000${candidate.model}`, candidate);
+      }
+      await Promise.all([...wanted.entries()].map(async ([key, candidate]) => {
+        try {
+          const info = await this.resolveVia(candidate.provider, candidate.model, signal);
+          const contextWindow = info?.context?.contextWindow;
+          found.set(key, {
+            ...(Number.isFinite(contextWindow) && contextWindow > 0 ? { contextWindow } : {}),
+            ...(Number.isFinite(info?.defaultMaxTokens) && info.defaultMaxTokens > 0 ? { maxTokens: info.defaultMaxTokens } : {}),
+          });
+        } catch {
+          // A route that cannot describe the model is not a reason to refuse the
+          // request: the configured capacity is the operator's own statement,
+          // and the attempt itself will report the truth if it disagrees.
+          found.set(key, undefined);
+        }
+      }));
+    }
+    this.liveCaps.set(model.id, found);
+    return (candidate) => found.get(`${candidate.provider}\u0000${candidate.model}`);
+  }
+
+  /**
+   * The live ceiling a reused route published for one candidate, if it was read.
+   *
+   * @param {import('./normalize.js').NormalizedModel} model - the logical model.
+   * @param {import('./normalize.js').NormalizedCandidate} candidate - the candidate.
+   * @returns {number | undefined} the ceiling, when known.
+   */
+  liveMaxTokens(model, candidate) {
+    const caps = this.liveCaps.get(model.id)?.get(`${candidate.provider}\u0000${candidate.model}`);
+    return caps?.maxTokens;
   }
 
   /**
@@ -356,7 +422,11 @@ export class CustomProviderAdapter {
   }
 
   /**
-   * Perform one attempt against one candidate.
+   * Perform one attempt against one candidate, by the mode the candidate declares.
+   *
+   * The cascade does not care which mode a candidate uses — that is the point of
+   * deciding it in normalization — so this only routes to the matching
+   * implementation.
    *
    * @param {import('./normalize.js').NormalizedCandidate} candidate - the candidate.
    * @param {import('./normalize.js').NormalizedModel} model - the model being served.
@@ -365,7 +435,23 @@ export class CustomProviderAdapter {
    * @returns {AsyncGenerator<object>} Harness chunks, ending with usage and finish.
    * @throws {ProviderFailureError} when the attempt fails.
    */
-  async *attempt(candidate, model, options, config) {
+  attempt(candidate, model, options, config) {
+    return candidate.reuse
+      ? this.attemptReuse(candidate, model, options, config)
+      : this.attemptDirect(candidate, model, options, config);
+  }
+
+  /**
+   * Perform one attempt against one candidate over OpenAI Chat Completions.
+   *
+   * @param {import('./normalize.js').NormalizedCandidate} candidate - the candidate.
+   * @param {import('./normalize.js').NormalizedModel} model - the model being served.
+   * @param {any} options - the request.
+   * @param {import('./normalize.js').NormalizedConfig} config - the configuration in force.
+   * @returns {AsyncGenerator<object>} Harness chunks, ending with usage and finish.
+   * @throws {ProviderFailureError} when the attempt fails.
+   */
+  async *attemptDirect(candidate, model, options, config) {
     const apiKey = await this.keyFor(candidate);
     const payload = await buildChatPayload(options, {
       model,
@@ -426,6 +512,87 @@ export class CustomProviderAdapter {
     for (const emitted of tracker.close()) yield emitted;
     if (usage !== undefined) yield { type: 'usage', usage: mapUsage(usage) };
     yield { type: 'finish', reason: finishReasonOf(finishReason) };
+  }
+
+  /**
+   * Perform one attempt by handing the call to the route that already serves it.
+   *
+   * Everything that makes the reused model worth reusing travels with the
+   * request: the owning adapter keeps its endpoint, its credential path, its
+   * protocol (Chat Completions, Responses, Anthropic Messages…), its reasoning
+   * effort table and its own retry policy. This plugin's only job is the
+   * rotation, so it forwards the caller's request verbatim and *does not*
+   * re-project the payload — the inner adapter does that projection once, and a
+   * second conversion on top would double-encode images and tools.
+   *
+   * The one thing deliberately not forwarded is replay state on the message
+   * history: the Harness strips provider replay envelopes whose route belongs to
+   * another adapter, so history arrives here already provider-neutral. Passing
+   * it through unchanged is therefore correct, not a loss.
+   *
+   * Failures arrive as a terminal `finish` chunk rather than a thrown error —
+   * that is the documented stream protocol — so they are turned back into a
+   * `ProviderFailureError` for the cascade, which is the only shape it acts on.
+   *
+   * @param {import('./normalize.js').NormalizedCandidate} candidate - the reuse candidate.
+   * @param {import('./normalize.js').NormalizedModel} model - the model being served.
+   * @param {any} options - the request.
+   * @param {import('./normalize.js').NormalizedConfig} config - the configuration in force.
+   * @returns {AsyncGenerator<object>} Harness chunks, ending with usage and finish.
+   * @throws {ProviderFailureError} when the reused route failed.
+   */
+  async *attemptReuse(candidate, model, options, config) {
+    if (typeof this.streamVia !== 'function') {
+      throw new ProviderFailureError({
+        kind: 'fatal',
+        code: 'REUSE_UNAVAILABLE',
+        detail: `候选 "${candidate.key}" 复用路由 "${candidate.provider}"，但当前运行时没有挂载 LLM 服务`,
+      });
+    }
+
+    // The candidate's own ceiling still applies. A reused route may accept less
+    // than the logical model advertises — that is the whole reason the cap
+    // exists — and the inner adapter would otherwise be handed a value its
+    // endpoint refuses. The route's own published ceiling is folded in the same
+    // way, so the number sent can never exceed what the caller was told.
+    const declared = attemptMaxTokens(options.maxTokens, candidate, model);
+    const liveCap = this.liveMaxTokens(model, candidate);
+    const maxTokens = liveCap === undefined ? declared : Math.min(declared, liveCap);
+    const forwarded = maxTokens === options.maxTokens ? options : { ...options, maxTokens };
+    let visible = false;
+    let failure;
+    /** @type {object | undefined} */
+    let finish;
+
+    for await (const chunk of this.streamVia(candidate.provider, candidate.model, forwarded, options.signal)) {
+      if (chunk === null || typeof chunk !== 'object') continue;
+      if (chunk.type === 'finish') {
+        const reason = chunk.reason;
+        if (reason?.kind === 'error' || reason?.kind === 'aborted') {
+          failure = classifyDelegatedFailure(reason.failure);
+        } else {
+          finish = reason;
+        }
+        // The terminal chunk is not forwarded: this adapter owns the finish it
+        // reports, so that a rotation can replace it with the next candidate's.
+        continue;
+      }
+      if (chunk.type !== 'usage') visible = true;
+      yield chunk;
+    }
+
+    if (failure !== undefined) throw new ProviderFailureError(failure);
+    if (!visible) {
+      // The reused route completed without producing anything. That would be
+      // reported as a normal empty turn and silently end the step, so it is
+      // named instead — the same rule the direct path applies.
+      throw new ProviderFailureError({
+        kind: 'fatal',
+        code: 'EMPTY_RESPONSE',
+        detail: `复用路由 "${candidate.provider}" 的模型 "${candidate.model}" 返回了空响应（无文本、无工具调用）`,
+      });
+    }
+    yield { type: 'finish', reason: finish ?? { kind: 'stop' } };
   }
 
   /**
