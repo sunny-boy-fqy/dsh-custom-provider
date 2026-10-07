@@ -277,6 +277,7 @@ test('a reuse candidate forwards the request to its own route', async () => {
   const chunks = await collect(adapter.stream({
     provider: 'custom',
     model: 'high',
+    maxTokens: 100_000,
     messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }],
     tools: [{ name: 't', description: 'd', parameters: {} }],
   }));
@@ -284,10 +285,9 @@ test('a reuse candidate forwards the request to its own route', async () => {
   assert.equal(seen.length, 1, 'exactly one delegated attempt');
   assert.equal(seen[0].provider, 'our-free-model');
   assert.equal(seen[0].model, 'space-bunny-free');
-  // The caller's maxTokens is inherited from the model's default; the tools are
-  // forwarded untouched so the inner adapter is the only converter.
+  // Forwarded verbatim: what the caller asked for is what the route receives.
   assert.equal(seen[0].maxTokens, 100_000);
-  assert.equal(seen[0].tools.length, 1);
+  assert.equal(seen[0].tools.length, 1, 'tools are forwarded untouched, so the inner adapter is the only converter');
   assert.deepEqual(chunks.map((chunk) => chunk.type), ['text-delta', 'finish']);
   assert.equal(chunks.at(-1).reason.kind, 'stop');
 });
@@ -392,13 +392,18 @@ test('a reused route that produces nothing is named, not passed off as an empty 
   assert.equal(chunks.at(-1).reason.failure.code, 'EMPTY_RESPONSE');
 });
 
-test('the candidate ceiling still clamps a delegated request', async () => {
+test('a ceiling configured on a reuse candidate is not imposed on the route', async () => {
+  // The whole point of reuse is that the borrowed model is called through its
+  // own API with no local configuration. A `maxTokens` left on the candidate —
+  // by an earlier version, or by an operator who misread the field — must not
+  // silently cap it, or a model the operator chose to borrow rather than
+  // configure would quietly answer less than it can.
   const config = normalizeConfig({
     providerId: 'custom',
     models: [{
       id: 'high',
       maxTokens: 393_216,
-      candidates: [{ id: 'borrowed', provider: 'p', model: 'x', maxTokens: 65_536 }],
+      candidates: [{ id: 'borrowed', provider: 'p', model: 'x', maxTokens: 65_536, contextWindow: 8_192, headers: { 'x-custom': '1' } }],
     }],
   });
   let requested;
@@ -410,9 +415,10 @@ test('the candidate ceiling still clamps a delegated request', async () => {
       return yields({ type: 'text-delta', index: 0, text: 'x' }, { type: 'finish', reason: { kind: 'stop' } });
     },
   });
-  await collect(adapter.stream({ provider: 'custom', model: 'high', messages: [] }));
-  assert.equal(requested, 65_536);
+  await collect(adapter.stream({ provider: 'custom', model: 'high', maxTokens: 393_216, messages: [] }));
+  assert.equal(requested, 393_216, "the caller's ceiling is sent, not the candidate field");
 });
+
 
 test('without an LLM service a reuse candidate reports why instead of silently failing', async () => {
   const config = normalizeConfig({
@@ -494,9 +500,11 @@ test('the number sent never exceeds what the caller was told the model accepts',
   assert.equal(sent, 32_768);
 });
 
-test('an attempt with no prior resolution still respects the declared ceiling', async () => {
-  // Dispatch without resolution is not the runtime path, but it must not become
-  // a way to send more than the candidate declared.
+test('an attempt with no prior resolution sends the request as-is', async () => {
+  // Dispatch without resolution is not the runtime path, so there is no live
+  // route ceiling to hold the caller to. Nothing is invented in its place: the
+  // request goes through unchanged rather than being capped by a number the
+  // route never published.
   const config = normalizeConfig({
     providerId: 'custom',
     models: [{
@@ -514,8 +522,63 @@ test('an attempt with no prior resolution still respects the declared ceiling', 
       return yields({ type: 'text-delta', index: 0, text: 'x' }, { type: 'finish', reason: { kind: 'stop' } });
     },
   });
+  await collect(adapter.stream({ provider: 'custom', model: 'high', maxTokens: 100_000, messages: [] }));
+  assert.equal(sent, 100_000);
+});
+
+test('a reuse attempt invents no parameter the caller did not send', async () => {
+  // The strongest form of "configure nothing": when the caller sends no ceiling,
+  // the request carries none, and the route's own adapter applies its own
+  // default. Filling in a number here would be exactly the local configuration
+  // reuse is meant to avoid.
+  const config = normalizeConfig({
+    providerId: 'custom',
+    models: [{
+      id: 'high',
+      maxTokens: 100_000,
+      candidates: [{ id: 'borrowed', provider: 'our-free-model', model: 'x', maxTokens: 8_192 }],
+    }],
+  });
+  let forwarded;
+  const adapter = new CustomProviderAdapter({
+    readConfig: () => config,
+    health: memoryHealth(),
+    streamVia: (_provider, _model, options) => {
+      forwarded = options;
+      return yields({ type: 'text-delta', index: 0, text: 'x' }, { type: 'finish', reason: { kind: 'stop' } });
+    },
+  });
   await collect(adapter.stream({ provider: 'custom', model: 'high', messages: [] }));
-  assert.equal(sent, 8_192);
+  assert.equal(Object.hasOwn(forwarded, 'maxTokens'), false, 'no ceiling is invented');
+});
+
+test('a resolved route ceiling still holds the caller to what it was told', async () => {
+  // The one clamp that stays. `resolveModel` reports the route's own ceiling, so
+  // a caller that then asks for more is asking beyond what it was told; sending
+  // that through is the case this guards.
+  const config = normalizeConfig({
+    providerId: 'custom',
+    models: [{
+      id: 'high',
+      maxTokens: 100_000,
+      candidates: [{ id: 'borrowed', provider: 'our-free-model', model: 'x' }],
+    }],
+  });
+  let sent;
+  const adapter = new CustomProviderAdapter({
+    readConfig: () => config,
+    health: memoryHealth(),
+    resolveVia: async () => ({ provider: 'our-free-model', id: 'x', defaultMaxTokens: 4_096 }),
+    streamVia: (_provider, _model, options) => {
+      sent = options.maxTokens;
+      return yields({ type: 'text-delta', index: 0, text: 'x' }, { type: 'finish', reason: { kind: 'stop' } });
+    },
+  });
+  // Resolve first, the way the runtime does, so the route ceiling is known.
+  const resolved = await adapter.resolveModel('custom', 'high');
+  assert.equal(resolved.defaultMaxTokens, 4_096, 'the route ceiling is reported as given');
+  await collect(adapter.stream({ provider: 'custom', model: 'high', maxTokens: 100_000, messages: [] }));
+  assert.equal(sent, 4_096);
 });
 
 test('a route that cannot describe its model degrades to the configured numbers', async () => {

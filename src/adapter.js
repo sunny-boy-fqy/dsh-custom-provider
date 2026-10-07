@@ -318,16 +318,33 @@ export class CustomProviderAdapter {
     // network I/O, and a route that cannot answer degrades to the configured
     // numbers rather than failing the request.
     const live = await this.liveCapabilities(resolved, signal);
-    // Report the *effective* capability: the smallest ceiling any usable
-    // candidate accepts. Reporting the model's own numbers would let the
-    // harness pick a default the fallback endpoint then refuses.
+
+    // When every usable candidate borrows from a route, the route's own answer is
+    // the whole truth, so it is reported **as given** — no minimum against the
+    // configured numbers, which for a borrowed model are defaults nobody chose.
+    // Reporting anything narrower would tell the harness a ceiling the route
+    // never claimed.
+    //
+    // A mixed model (a direct candidate beside a reused one) still takes the
+    // minimum, because that is the only number all of its candidates can honour.
+    const borrowed = resolved.usableCandidates.filter((candidate) => candidate.reuse);
+    const onlyBorrowed = borrowed.length > 0 && borrowed.length === resolved.usableCandidates.length;
+    const borrowedLimit = (field) => {
+      const values = borrowed
+        .map((candidate) => live(candidate)?.[field])
+        .filter((value) => value !== undefined);
+      return values.length === borrowed.length && values.length > 0 ? Math.min(...values) : undefined;
+    };
+    const liveContext = onlyBorrowed ? borrowedLimit('contextWindow') : undefined;
+    const liveMax = onlyBorrowed ? borrowedLimit('maxTokens') : undefined;
+
     const limits = effectiveLimits(resolved, live);
     return {
       provider,
       id: resolved.id,
       name: resolved.name,
-      context: { contextWindow: limits.contextWindow },
-      defaultMaxTokens: limits.maxTokens,
+      context: { contextWindow: liveContext ?? limits.contextWindow },
+      defaultMaxTokens: liveMax ?? limits.maxTokens,
       inputModalities: [...resolved.input],
     };
   }
@@ -550,15 +567,24 @@ export class CustomProviderAdapter {
       });
     }
 
-    // The candidate's own ceiling still applies. A reused route may accept less
-    // than the logical model advertises — that is the whole reason the cap
-    // exists — and the inner adapter would otherwise be handed a value its
-    // endpoint refuses. The route's own published ceiling is folded in the same
-    // way, so the number sent can never exceed what the caller was told.
-    const declared = attemptMaxTokens(options.maxTokens, candidate, model);
+    // The request is forwarded **verbatim**. A reuse candidate configures no
+    // request parameters of its own — not a ceiling, not a context window, not a
+    // header — because the reused route's own adapter owns every one of them.
+    // Clamping `maxTokens` against the candidate's declared ceiling, as an
+    // earlier version did, let an operator silently cap a model they had
+    // explicitly chosen to borrow rather than to configure.
+    //
+    // The "never send more than the caller was told" invariant still holds, and
+    // now holds more directly: `resolveModel` reports the *route's* published
+    // ceiling, the caller asks within it, and this code changes nothing. The
+    // route's live ceiling remains as a safety net for a caller that asks beyond
+    // what it was told; a candidate's own configured numbers are not consulted.
     const liveCap = this.liveMaxTokens(model, candidate);
-    const maxTokens = liveCap === undefined ? declared : Math.min(declared, liveCap);
-    const forwarded = maxTokens === options.maxTokens ? options : { ...options, maxTokens };
+    const asked = options.maxTokens;
+    const maxTokens = liveCap === undefined || typeof asked !== 'number' || asked <= liveCap
+      ? asked
+      : liveCap;
+    const forwarded = maxTokens === asked ? options : { ...options, maxTokens };
     let visible = false;
     let failure;
     /** @type {object | undefined} */

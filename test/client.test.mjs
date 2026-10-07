@@ -236,6 +236,10 @@ function makeReact() {
         has(id) {
           return api.byId(id) !== undefined;
         },
+        /** Every `id` prop in the tree, depth-first, so a list can be asserted. */
+        ids() {
+          return api.find((node) => typeof node.props?.id === 'string').map((node) => node.props.id);
+        },
         click(id) {
           const node = api.byId(id);
           assert.ok(node !== undefined, `no node with id "${id}"`);
@@ -328,6 +332,30 @@ function stateValue() {
     failoverOnTransient: true,
     failoverOnAnyError: false,
     extraQuotaPatterns: ['insufficient balance'],
+  };
+}
+
+/**
+ * A candidate with every field the editor expects.
+ *
+ * Tests that need to start from a *reuse* candidate spread this and override, so
+ * they never restate the whole shape — and a field added to the candidate later
+ * shows up here instead of silently becoming `undefined` across the fixtures.
+ */
+function blankCandidateFixture() {
+  return {
+    id: 'c1',
+    name: '',
+    provider: '',
+    baseURL: '',
+    keyId: '',
+    apiKey: '',
+    credentialRef: '',
+    model: '',
+    headers: {},
+    maxTokens: 0,
+    contextWindow: 0,
+    enabled: true,
   };
 }
 
@@ -704,6 +732,289 @@ test('the client derives the same id the host would', async () => {
     await settle();
     const saved = form.mutations[0].ops[0].value.slice(1).map((model) => model.id);
     assert.deepEqual(saved, samples.map((id) => host.reuseModelId(id)));
+  } finally {
+    restore();
+  }
+});
+
+// ── picking a model on the chosen route ──────────────────────────────────────
+
+test('a reuse candidate can pick its model from the route, not just type it', async () => {
+  // Choosing a route is only half the job: the operator still has to name a
+  // model on it. Requiring them to recall `space-bunny-free` from memory is the
+  // friction this removes, so the route's live models are offered in the card.
+  const { mounted, form, restore } = mountEditor();
+  try {
+    mounted.click('cc-reuse-refresh');
+    await settle();
+    mounted.click('cc-0-0-provider');
+    mounted.click('cc-0-0-provider-opt-1'); // our-free-model
+    await settle();
+
+    assert.ok(mounted.has('cc-0-0-pick'), 'the card offers a model picker');
+    mounted.click('cc-0-0-pick');
+    // The route advertises two models, so both are listed.
+    const listed = mounted.ids().filter((id) => id.startsWith('cc-0-0-pick-opt-'));
+    assert.equal(listed.length, 2, `expected two models, got ${listed.join(', ')}`);
+
+    mounted.click('cc-0-0-pick-opt-1');
+    assert.equal(mounted.byId('cc-0-0-model').props.value, 'longcat-2.5-preview-free');
+
+    mounted.click('cc-save');
+    await settle();
+    const saved = form.mutations[0].ops[0].value[0].candidates[0];
+    assert.equal(saved.provider, 'our-free-model');
+    assert.equal(saved.model, 'longcat-2.5-preview-free', 'the picked model is what gets saved');
+  } finally {
+    restore();
+  }
+});
+
+test('picking a model fills only the model id, leaving the name the operator chose', async () => {
+  const { mounted, form, restore } = mountEditor();
+  try {
+    mounted.click('cc-reuse-refresh');
+    await settle();
+    mounted.click('cc-0-0-provider');
+    mounted.click('cc-0-0-provider-opt-1');
+    await settle();
+    // The operator names the candidate first.
+    // `byId` finds the inner <input>, whose handler unwraps the event.
+    mounted.byId('cc-0-0-id').props.onChange({ target: { value: 'my-fast-free' } });
+    mounted.click('cc-0-0-pick');
+    mounted.click('cc-0-0-pick-opt-0');
+    assert.equal(mounted.byId('cc-0-0-id').props.value, 'my-fast-free', 'the candidate id is not overwritten');
+
+    mounted.click('cc-save');
+    await settle();
+    const saved = form.mutations[0].ops[0].value[0].candidates[0];
+    assert.equal(saved.id, 'my-fast-free');
+    assert.equal(saved.model, 'space-bunny-free');
+  } finally {
+    restore();
+  }
+});
+
+test('the model picker filters by id or name', async () => {
+  const { mounted, restore } = mountEditor();
+  try {
+    mounted.click('cc-reuse-refresh');
+    await settle();
+    mounted.click('cc-0-0-provider');
+    mounted.click('cc-0-0-provider-opt-1');
+    await settle();
+    mounted.click('cc-0-0-pick');
+    assert.equal(mounted.ids().filter((id) => id.startsWith('cc-0-0-pick-opt-')).length, 2);
+
+    mounted.byId('cc-0-0-pick-filter').props.onChange({ target: { value: 'longcat' } });
+    assert.deepEqual(mounted.ids().filter((id) => id.startsWith('cc-0-0-pick-opt-')), ['cc-0-0-pick-opt-0']);
+    // ...and by display name, which is what the operator may actually remember.
+    mounted.byId('cc-0-0-pick-filter').props.onChange({ target: { value: 'space bunny' } });
+    assert.deepEqual(mounted.ids().filter((id) => id.startsWith('cc-0-0-pick-opt-')), ['cc-0-0-pick-opt-0']);
+    // A filter matching nothing says so rather than showing an empty box.
+    mounted.byId('cc-0-0-pick-filter').props.onChange({ target: { value: 'zzz-no-such-model' } });
+    assert.equal(mounted.ids().filter((id) => id.startsWith('cc-0-0-pick-opt-')).length, 0);
+    assert.ok(mounted.has('cc-0-0-pick-empty'));
+  } finally {
+    restore();
+  }
+});
+
+test('a route whose read failed explains itself in the picker', async () => {
+  // `deepseek-official` is in CATALOG.failures. The picker must name the failure
+  // instead of looking like a route that simply has no models.
+  const value = stateValue();
+  value.models[0].candidates = [{ ...blankCandidateFixture(), id: 'ds', provider: 'deepseek-official', model: 'deepseek-v4.1-flash' }];
+  const { mounted, restore } = mountEditor({ value });
+  try {
+    mounted.click('cc-reuse-refresh');
+    await settle();
+    mounted.click('cc-0-0-pick');
+    assert.ok(mounted.has('cc-0-0-pick-failed'), 'the failure is shown');
+    assert.match(mounted.text('cc-0-0-pick-failed'), /gateway unreachable/);
+  } finally {
+    restore();
+  }
+});
+
+test('switching to a different route clears the model that belonged to the old one', async () => {
+  // A model id is only meaningful on the route it came from. Leaving it would
+  // produce a candidate that fails on the first request for a reason the page
+  // could have prevented.
+  const value = stateValue();
+  value.models[0].candidates = [{ ...blankCandidateFixture(), id: 'c', provider: 'our-free-model', model: 'space-bunny-free' }];
+  const { mounted, form, restore } = mountEditor({ value });
+  try {
+    mounted.click('cc-reuse-refresh');
+    await settle();
+    assert.equal(mounted.byId('cc-0-0-model').props.value, 'space-bunny-free');
+    mounted.click('cc-0-0-provider');
+    mounted.click('cc-0-0-provider-opt-2'); // openrouter-free
+    assert.equal(mounted.byId('cc-0-0-model').props.value, '', 'the foreign model id is dropped');
+    // Re-picking the route it already had must not clear a valid model.
+    mounted.byId('cc-0-0-pick') && mounted.click('cc-0-0-provider');
+    mounted.click('cc-0-0-provider-opt-2');
+    assert.equal(mounted.byId('cc-0-0-model').props.value, '');
+  } finally {
+    restore();
+  }
+});
+
+test('choosing a route reads the registry, so the picker is not empty', async () => {
+  // Opening a card and picking a route must not require a separate Refresh click
+  // first: that order dependency is invisible and reads as a broken picker.
+  const { mounted, calls, restore } = mountEditor();
+  try {
+    const before = calls.filter((call) => call.url.endsWith('/catalog')).length;
+    mounted.click('cc-0-0-provider');
+    // Opening the picker starts the read; the options appear once it lands.
+    await settle();
+    mounted.click('cc-0-0-provider-opt-1');
+    await settle();
+    const after = calls.filter((call) => call.url.endsWith('/catalog')).length;
+    assert.equal(after, before + 1, 'picking a route triggers exactly one catalog read');
+    mounted.click('cc-0-0-pick');
+    assert.equal(mounted.ids().filter((id) => id.startsWith('cc-0-0-pick-opt-')).length, 2, 'the models are there');
+  } finally {
+    restore();
+  }
+});
+
+test('an unread route says it is reading, not that it has no models', async () => {
+  // The picker offers a control before the registry has answered. Saying "this
+  // route advertises no models" at that moment is a lie about the route, and it
+  // contradicts the failure notice rendered beside it.
+  const value = stateValue();
+  value.models[0].candidates = [{ ...blankCandidateFixture(), id: 'c', provider: 'deepseek-official', model: 'deepseek-v4.1-flash' }];
+  const { mounted, restore } = mountEditor({ value });
+  try {
+    mounted.click('cc-reuse-refresh');
+    await settle();
+    mounted.click('cc-0-0-pick');
+    // `deepseek-official` is in failures, so the reason is shown...
+    assert.ok(mounted.has('cc-0-0-pick-failed'));
+    // ...and the empty claim is not made alongside it.
+    assert.equal(mounted.has('cc-0-0-pick-empty'), false, 'a failed read is not "no models"');
+    assert.equal(mounted.has('cc-0-0-pick-reading'), false, 'the read has finished');
+  } finally {
+    restore();
+  }
+});
+
+test('a route that advertises nothing says so plainly', async () => {
+  const catalog = {
+    ok: true, self: 'custom', reused: [], total: 0,
+    providers: [{ id: 'quiet-route', name: 'Quiet', models: [] }],
+    failures: [],
+  };
+  const value = stateValue();
+  value.models[0].candidates = [{ ...blankCandidateFixture(), id: 'c', provider: 'quiet-route', model: '' }];
+  const { mounted, restore } = mountEditor({ catalog, value });
+  try {
+    mounted.click('cc-reuse-refresh');
+    await settle();
+    mounted.click('cc-0-0-pick');
+    assert.ok(mounted.has('cc-0-0-pick-empty'), 'the empty case is still reported');
+    assert.equal(mounted.text('cc-0-0-pick-empty'), 'candidatePickModelEmpty');
+    assert.equal(mounted.has('cc-0-0-pick-failed'), false, 'an empty route is not a failure');
+  } finally {
+    restore();
+  }
+});
+
+test('the route picker counts each route and still lists one that failed to read', async () => {
+  // A route whose read failed is mounted and may be wanted anyway; hiding it
+  // would turn a transient registry error into a missing route. It is marked
+  // instead, and every route carries its model count so the choice is informed.
+  const { mounted, restore } = mountEditor();
+  try {
+    mounted.click('cc-0-0-provider');
+    await settle();
+    const labels = mounted.ids()
+      .filter((id) => id.startsWith('cc-0-0-provider-opt-'))
+      .map((id) => mounted.text(id));
+    assert.equal(labels[0], 'candidateProviderDirect', 'option 0 is always direct');
+    assert.ok(labels.some((label) => label === 'Our Free Model (2)'), `counts are shown: ${labels.join(' | ')}`);
+    assert.ok(labels.some((label) => label === 'OpenRouter Free (1)'), `counts are shown: ${labels.join(' | ')}`);
+    // The option shows the route's *display* name, and maps to its id.
+    assert.ok(labels.some((label) => label.includes('DeepSeek') && label.includes('reuseFailedShort')), `a failed route is listed and marked: ${labels.join(' | ')}`);
+    const marked = mounted.ids().filter((id) => id.startsWith('cc-0-0-provider-opt-')).at(-1);
+    mounted.click(marked);
+    assert.equal(mounted.text('cc-0-0-mode'), 'reuseBadge deepseek-official', 'the marked option selects the real route');
+  } finally {
+    restore();
+  }
+});
+
+test('the browser picker works on a catalog the real host produces', async () => {
+  // The suites either side of this one each pass on their own fixtures, which
+  // would not catch the two halves disagreeing about the payload's *shape*. This
+  // one runs the real host projection and feeds its exact output to the real
+  // bundle, so a field renamed on one side fails here rather than in the browser.
+  const { liveCatalogFor } = await import('./helpers/host-catalog.mjs');
+  const catalog = await liveCatalogFor([
+    { id: 'deepseek-official', name: 'DeepSeek', models: [{ id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', contextWindow: 1_000_000 }] },
+    { id: 'our-free-model', name: 'Our Free Model', models: [
+      { id: 'space-bunny-free', name: 'Space Bunny', contextWindow: 262_144 },
+      { id: 'kilo-auto/free', name: 'Kilo Auto Free', contextWindow: 256_000 },
+    ] },
+    { id: 'custom', name: '免费模型', models: [] },
+  ], ['our-free-model']);
+
+  const value = stateValue();
+  value.models[0].candidates = [{ ...blankCandidateFixture(), id: 'c', provider: 'our-free-model', model: '' }];
+  const { mounted, form, restore } = mountEditor({ catalog, value });
+  try {
+    mounted.click('cc-0-0-pick');
+    await settle();
+    const options = mounted.ids().filter((id) => id.startsWith('cc-0-0-pick-opt-'));
+    assert.equal(options.length, 2, `the host's models reached the picker: ${JSON.stringify(catalog)}`);
+
+    mounted.click('cc-0-0-pick-opt-1');
+    assert.equal(mounted.byId('cc-0-0-model').props.value, 'kilo-auto/free');
+    mounted.click('cc-save');
+    await settle();
+    const saved = form.mutations[0].ops[0].value[0].candidates[0];
+    assert.equal(saved.provider, 'our-free-model');
+    assert.equal(saved.model, 'kilo-auto/free');
+  } finally {
+    restore();
+  }
+});
+
+test('a reuse candidate shows no request-parameter fields at all', async () => {
+  // Reuse means "call that route's own API with nothing configured here". Every
+  // parameter control is therefore absent, not merely disabled: a field left on
+  // screen is an invitation to set something that would either be ignored or
+  // silently applied to a model the operator chose to borrow.
+  const value = stateValue();
+  value.models[0].candidates = [{ ...blankCandidateFixture(), id: 'free', provider: 'our-free-model', model: 'space-bunny-free' }];
+  const { mounted, restore } = mountEditor({ value });
+  try {
+    for (const field of ['url', 'key', 'ref', 'keyId', 'headers', 'maxTokens', 'contextWindow']) {
+      assert.equal(mounted.has(`cc-0-0-${field}`), false, `${field} must not be offered on a reuse candidate`);
+    }
+    assert.ok(mounted.has('cc-0-0-reuse-limits'), 'the reason is stated instead of the fields');
+    assert.equal(mounted.text('cc-0-0-reuse-limits'), 'reuseNoParams');
+    // What a reuse candidate *does* keep: identity, the route, the model, and on/off.
+    for (const field of ['id', 'provider', 'model', 'pick', 'enabled']) {
+      assert.ok(mounted.has(`cc-0-0-${field}`), `${field} must still be editable`);
+    }
+  } finally {
+    restore();
+  }
+});
+
+test('a direct candidate keeps every parameter field', async () => {
+  // The absence in the test above must be the reuse branch's doing, not a
+  // regression that removed the fields for everyone.
+  const { mounted, restore } = mountEditor();
+  try {
+    for (const field of ['url', 'key', 'ref', 'headers', 'maxTokens', 'contextWindow']) {
+      assert.ok(mounted.has(`cc-0-0-${field}`), `a direct candidate still needs ${field}`);
+    }
+    assert.equal(mounted.has('cc-0-0-reuse-limits'), false, 'a direct candidate shows no reuse note');
+    assert.equal(mounted.has('cc-0-0-pick'), false, 'there is no route to pick a model from');
   } finally {
     restore();
   }

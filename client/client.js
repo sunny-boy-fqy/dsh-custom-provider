@@ -76,6 +76,7 @@ window.__ModuleLoader__.load({
       reuseEmpty: '该路由此刻没有暴露任何模型。',
       reuseNoCatalog: '还没有读取模型列表：点上面的「刷新可用模型」。',
       reuseFailed: '以下路由没能返回模型列表：',
+      reuseFailedShort: '读取失败',
       reuseStale: '以下候选复用的路由当前未挂载：',
       reuseSelf: '本供应方自己的路由不会出现在这里（复用它会绕回自身）。',
       reuseImportedNote: '已导入',
@@ -85,7 +86,14 @@ window.__ModuleLoader__.load({
       candidateProviderHint: '选一个已注册的路由即成为「复用候选」：此时端点与密钥由该路由决定，下面这些字段不生效。',
       candidateReuseUpstream: '该路由暴露的模型 id',
       candidateReuseUpstreamHint: '填该路由自己的模型 id，例如 space-bunny-free 或 deepseek-ai/DeepSeek-V4.1-Flash。',
+      candidatePickModel: '从该路由挑选模型',
+      candidatePickModelHint: '列出该路由此刻暴露的模型，点一个即填入上面的模型 id。',
+      candidatePickModelEmpty: '该路由此刻没有暴露任何模型，可直接手填模型 id。',
+      candidatePickModelStale: '请先点上方「刷新可用模型」，让本页读到最新的路由与模型。',
+      candidatePickModelFilter: '按 id 或名称过滤',
+      candidatePickModelCurrent: '当前',
       reuseBadge: '复用',
+      reuseNoParams: '复用候选不配置任何参数：模型、输出上限、上下文窗口与请求头全部由该路由自己的接口决定，这里直接原样调用。',
       directBadge: '直连',
       modelN: '模型',
       modelId: '模型 id',
@@ -211,6 +219,7 @@ window.__ModuleLoader__.load({
       reuseEmpty: 'This route advertises no models right now.',
       reuseNoCatalog: 'Nothing read yet: press “Refresh available models”.',
       reuseFailed: 'These routes did not return a model list:',
+      reuseFailedShort: 'read failed',
       reuseStale: 'These candidates reuse a route that is not currently mounted:',
       reuseSelf: 'This provider’s own route is not offered (reusing it would loop back).',
       reuseImportedNote: 'imported',
@@ -220,7 +229,14 @@ window.__ModuleLoader__.load({
       candidateProviderHint: 'Picking a registered route makes this a reuse candidate: the endpoint and key become that route’s business, and the fields below stop applying.',
       candidateReuseUpstream: 'Model id that route exposes',
       candidateReuseUpstreamHint: 'The route’s own model id, e.g. space-bunny-free or deepseek-ai/DeepSeek-V4.1-Flash.',
+      candidatePickModel: 'Pick a model from this route',
+      candidatePickModelHint: 'Lists what this route advertises right now; one click fills in the model id above.',
+      candidatePickModelEmpty: 'This route advertises no models right now, so the id can be typed directly.',
+      candidatePickModelStale: 'Press “Refresh available models” above first, so this page has read the live routes and models.',
+      candidatePickModelFilter: 'Filter by id or name',
+      candidatePickModelCurrent: 'current',
       reuseBadge: 'reuse',
+      reuseNoParams: 'A reuse candidate configures nothing: the model, its output ceiling, its context window and the headers all belong to that route’s own API, which is called as-is.',
       directBadge: 'direct',
       modelN: 'Model',
       modelId: 'Model id',
@@ -503,6 +519,16 @@ window.__ModuleLoader__.load({
       /** Which reuse route is open in the import panel, and its filter text. */
       const [reuseOpen, setReuseOpen] = React.useState('');
       const [reuseFilter, setReuseFilter] = React.useState('');
+      /**
+       * The model picker inside a candidate card: which candidate's picker is
+       * open, and the filter typed into it.
+       *
+       * Choosing a route is not enough on its own — the operator still has to
+       * name a model on that route, and asking them to recall the exact id
+       * (`nvidia/nemotron-3-ultra-550b-a55b:free`) is the step this removes.
+       */
+      const [modelPicker, setModelPicker] = React.useState('');
+      const [modelFilter, setModelFilter] = React.useState('');
       /** Model ids appended by an import in this session: React state is async, this is not. */
       const appended = React.useRef(new Set());
 
@@ -1210,7 +1236,22 @@ window.__ModuleLoader__.load({
                         // silently rewritten to something else on the next save.
                         const routeOptions = [{ value: '', label: t('candidateProviderDirect') }]
                           .concat((catalog !== null && Array.isArray(catalog.providers) ? catalog.providers : [])
-                            .map((group) => ({ value: group.id, label: group.name })));
+                            // Each route carries how many models it exposes, so
+                            // picking one is an informed choice rather than a guess
+                            // between ids that look alike.
+                            .map((group) => ({
+                              value: group.id,
+                              label: `${group.name} (${(group.models ?? []).length})`,
+                            })));
+                        // Routes whose read failed are still mounted and may be wanted
+                        // anyway; hiding them would turn a transient registry error
+                        // into a missing route. They are listed and marked instead.
+                        const failedRoutes = catalog !== null && Array.isArray(catalog.failures) ? catalog.failures : [];
+                        for (const item of failedRoutes) {
+                          if (!routeOptions.some((option) => option.value === item.provider)) {
+                            routeOptions.push({ value: item.provider, label: `${item.name} (⚠ ${t('reuseFailedShort')})` });
+                          }
+                        }
                         if (isReuse && !routeOptions.some((option) => option.value === candidate.provider)) {
                           routeOptions.push({ value: candidate.provider, label: `${candidate.provider}${server?.staleReuse?.some((item) => item.provider === candidate.provider) ? ' ⚠' : ''}` });
                         }
@@ -1224,7 +1265,16 @@ window.__ModuleLoader__.load({
                                 style: S.select,
                                 disabled: !writable,
                                 'aria-expanded': openPicker === `provider:${slot}` ? 'true' : 'false',
-                                onClick: () => setOpenPicker(openPicker === `provider:${slot}` ? '' : `provider:${slot}`),
+                                onClick: () => {
+                                  // Opening the picker *is* the request to see the
+                                  // routes, so the registry is read here if it never
+                                  // was. The alternative — an empty list that only
+                                  // fills after pressing an unrelated Refresh button
+                                  // higher up the page — is an order dependency the
+                                  // operator cannot see.
+                                  if (catalog === null && !catalogBusy) void loadCatalog();
+                                  setOpenPicker(openPicker === `provider:${slot}` ? '' : `provider:${slot}`);
+                                },
                               }, `${isReuse ? candidate.provider : t('candidateProviderDirect')} ▾`),
                               openPicker === `provider:${slot}`
                                 ? h('div', { id: `cc-${modelIndex}-${candidateIndex}-provider-list`, style: S.optionList },
@@ -1236,6 +1286,16 @@ window.__ModuleLoader__.load({
                                       onClick: () => {
                                         setOpenPicker('');
                                         patchCandidate(modelIndex, candidateIndex, { provider: option.value });
+                                        // A model id belongs to the route it was
+                                        // chosen from, so switching to a *different*
+                                        // route drops it rather than leaving a foreign
+                                        // id to fail on the first request. The picker
+                                        // below makes choosing a new one one click.
+                                        const changedRoute = option.value !== (candidate.provider ?? '');
+                                        setModelPicker('');
+                                        if (changedRoute && (candidate.model ?? '').length > 0) {
+                                          patchCandidate(modelIndex, candidateIndex, { model: '' });
+                                        }
                                       },
                                     }, option.label)))
                                 : null,
@@ -1259,8 +1319,93 @@ window.__ModuleLoader__.load({
                             // A reuse candidate has no endpoint of its own: the
                             // route owns it. Showing those fields would invite an
                             // edit that saves and then silently does nothing.
-                            ? h('div', { key: 'reuse-note', style: S.hint, id: `cc-${modelIndex}-${candidateIndex}-reuse-note` },
-                                `${t('reuseBadge')} → ${candidate.provider} · ${candidate.model}`)
+                            //
+                            // What it gets instead is the step that actually
+                            // matters: naming a model *on that route*. Choosing a
+                            // route and then having to recall
+                            // `nvidia/nemotron-3-ultra-550b-a55b:free` from memory is
+                            // the friction this feature exists to remove.
+                            ? h('div', { key: 'reuse', style: S.body },
+                                h('div', { style: S.hint, id: `cc-${modelIndex}-${candidateIndex}-reuse-note` },
+                                  `${t('reuseBadge')} → ${candidate.provider} · ${candidate.model}`),
+                                (() => {
+                                  const group = catalog === null
+                                    ? undefined
+                                    : (catalog.providers ?? []).find((item) => item.id === candidate.provider);
+                                  const pickerKey = `model:${modelIndex}.${candidateIndex}`;
+                                  const open = modelPicker === pickerKey;
+                                  // Four states, each said differently, because
+                                  // "nothing here" and "not read yet" call for
+                                  // different actions. Exactly one is shown: a
+                                  // failure rendered beside "no models" would claim
+                                  // the route is empty when we simply could not read it.
+                                  const reading = catalogBusy === true;
+                                  const failure = reading
+                                    ? undefined
+                                    : catalog === null
+                                      ? t('candidatePickModelStale')
+                                      : (catalog.failures ?? []).find((item) => item.provider === candidate.provider)?.error;
+                                  const models = group?.models ?? [];
+                                  const needle = modelFilter.trim().toLowerCase();
+                                  const shown = models.filter((model) =>
+                                    needle.length === 0
+                                    || String(model.id).toLowerCase().includes(needle)
+                                    || String(model.name).toLowerCase().includes(needle));
+                                  return [
+                                    h('div', { key: 'pick', style: S.row },
+                                      h('div', { style: { ...S.field, flex: '1 1 auto' } },
+                                        h('button', {
+                                          id: `cc-${modelIndex}-${candidateIndex}-pick`,
+                                          type: 'button',
+                                          style: S.select,
+                                          // Not disabled while the catalog is missing: a
+                                          // disabled control here is a dead end, since
+                                          // pressing it is the only way to ask for the
+                                          // list. It loads the registry and opens.
+                                          disabled: !writable,
+                                          'aria-expanded': open ? 'true' : 'false',
+                                          onClick: () => {
+                                            if (catalog === null && !catalogBusy) void loadCatalog();
+                                            setModelFilter('');
+                                            setModelPicker(open ? '' : pickerKey);
+                                          },
+                                        }, `${t('candidatePickModel')}${models.length > 0 ? ` (${models.length})` : ''} ▾`),
+                                        h('div', { style: S.hint }, t('candidatePickModelHint')),
+                                        open
+                                          ? h('div', { key: 'list', style: S.body },
+                                              h('input', {
+                                                id: `cc-${modelIndex}-${candidateIndex}-pick-filter`,
+                                                style: S.input,
+                                                placeholder: t('candidatePickModelFilter'),
+                                                value: modelFilter,
+                                                onChange: (event) => setModelFilter(event.target.value),
+                                              }),
+                                              failure !== undefined
+                                                ? h('div', { style: S.warn, id: `cc-${modelIndex}-${candidateIndex}-pick-failed` },
+                                                    `${t('reuseFailed')} ${failure}`)
+                                                : reading
+                                                  ? h('div', { style: S.hint, id: `cc-${modelIndex}-${candidateIndex}-pick-reading` },
+                                                      t('reuseRefreshing'))
+                                                  : shown.length === 0
+                                                    ? h('div', { style: S.hint, id: `cc-${modelIndex}-${candidateIndex}-pick-empty` },
+                                                        models.length === 0 ? t('candidatePickModelEmpty') : t('reuseEmpty'))
+                                                    : h('div', { id: `cc-${modelIndex}-${candidateIndex}-pick-list`, style: S.optionList },
+                                                        shown.map((model, modelOption) => h('button', {
+                                                          id: `cc-${modelIndex}-${candidateIndex}-pick-opt-${modelOption}`,
+                                                          key: `pick-opt-${modelOption}`,
+                                                          type: 'button',
+                                                          style: model.id === candidate.model ? S.optionActive : S.option,
+                                                          // Picking a model fills the model id and
+                                                          // nothing else: renaming the candidate the
+                                                          // operator already named would be surprising.
+                                                          onClick: () => {
+                                                            setModelPicker('');
+                                                            patchCandidate(modelIndex, candidateIndex, { model: model.id });
+                                                          },
+                                                        }, `${model.id}${model.name && model.name !== model.id ? ` · ${model.name}` : ''}${Number.isFinite(model.contextWindow) ? ` · ctx ${model.contextWindow}` : ''}${model.reasoning === true ? ' · 思考' : ''}${model.id === candidate.model ? ` (${t('candidatePickModelCurrent')})` : ''}`))))
+                                          : null))
+                                  ];
+                                })())
                             : h('div', { key: 'direct', style: S.body },
                                 h('div', { style: S.row },
                                   h(Field, {
@@ -1316,7 +1461,10 @@ window.__ModuleLoader__.load({
                                     id: `cc-${modelIndex}-${candidateIndex}-ref`, label: t('credentialRef'), hint: t('credentialRefHint'), mono: true, disabled: !writable,
                                     value: candidate.credentialRef ?? '', onChange: (value) => patchCandidate(modelIndex, candidateIndex, { credentialRef: value }),
                                   })),
-                                h('div', { style: S.field },
+                                // Headers are a request parameter like any other, so a
+                                // reuse candidate does not offer them: the route's own
+                                // adapter is what sets them.
+                                isReuse ? null : h('div', { style: S.field },
                                   h('label', { style: S.label, htmlFor: `cc-${modelIndex}-${candidateIndex}-headers` }, t('moreOptions')),
                                   h('textarea', {
                                     id: `cc-${modelIndex}-${candidateIndex}-headers`,
@@ -1327,8 +1475,17 @@ window.__ModuleLoader__.load({
                                   }),
                                   headerError[slot] === true ? h('div', { style: S.error }, t('headersInvalid')) : null)),
                           h('div', { key: 'caps', style: S.row },
-                            capField(modelIndex, candidateIndex, candidate, 'maxTokens', t('capMaxTokens'), t('capMaxTokensHint')),
-                            capField(modelIndex, candidateIndex, candidate, 'contextWindow', t('capContextWindow'), t('capContextWindowHint')),
+                            // A reuse candidate configures no request parameters.
+                            // Its ceiling, its context window and its headers all
+                            // belong to the route's own adapter, which is why the
+                            // endpoint and key fields are gone too. The controls
+                            // would not merely be useless here: a stale number
+                            // would be applied back onto a model the operator chose
+                            // to borrow rather than to configure.
+                            isReuse
+                              ? h('div', { style: S.hint, id: `cc-${modelIndex}-${candidateIndex}-reuse-limits` }, t('reuseNoParams'))
+                              : capField(modelIndex, candidateIndex, candidate, 'maxTokens', t('capMaxTokens'), t('capMaxTokensHint')),
+                            isReuse ? null : capField(modelIndex, candidateIndex, candidate, 'contextWindow', t('capContextWindow'), t('capContextWindowHint')),
                             h(Toggle, {
                               id: `cc-${modelIndex}-${candidateIndex}-enabled`, label: t('enabled'), checked: candidate.enabled !== false, disabled: !writable,
                               onChange: (checked) => patchCandidate(modelIndex, candidateIndex, { enabled: checked }),
