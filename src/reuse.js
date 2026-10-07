@@ -194,23 +194,44 @@ export function buildCatalogView({ providers, listed, self }) {
 /**
  * The id a reused model should take in this provider's own model list.
  *
- * The reused id is already what the operator sees in the picker
- * (`space-bunny-free`, `deepseek-v4.1-flash`), so keeping it means one concept
- * has one name. A leading `org/` path segment is dropped because a slash is not
- * legal in a model id here, and the rest is slugged.
+ * The reused id is already what the operator sees in the picker, so the goal is
+ * an id that is legal, unique, and as close to the original as it can be. A
+ * single rule cannot do all three:
+ *
+ * - Keeping only the last path segment reads well for the common shape
+ *   (`deepseek-ai/DeepSeek-V4.1-Flash` → `deepseek-v4.1-flash`) but collapses
+ *   distinct models whenever the leaf is generic. The free lane alone carries
+ *   both `kilo-auto/free` and `openrouter/free`, which would both become `free`;
+ *   the second import would then be refused as "already here" although it is a
+ *   different model. That is a correctness bug, not a cosmetic one.
+ * - Always keeping two segments fixes that but spells the organization twice
+ *   whenever the leaf already names it: `deepseek-ai-deepseek-v4.1-flash`.
+ *
+ * So the parent is kept **only when the leaf does not already carry it** — the
+ * test is whether the leaf's slug starts with the parent's first word. That
+ * produces `deepseek-v4.1-flash`, `nemotron-3-ultra-550b-a55b-free`… and keeps
+ * `kilo-auto-free` apart from `openrouter-free`.
  *
  * @param {string} modelId - the reused model id.
  * @param {string} [fallback] - the display name, when the id slugs to nothing.
  * @returns {string} a legal model id, or `''` when nothing usable remains.
  */
 export function reuseModelId(modelId, fallback = '') {
-  const tail = String(modelId ?? '').trim().split('/').filter((part) => part.length > 0).at(-1) ?? '';
-  const source = tail.length > 0 ? tail : String(fallback ?? '');
-  return source
+  const parts = String(modelId ?? '').trim().split('/').filter((part) => part.length > 0);
+  const slug = (text) => text
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/gu, '-')
     .replace(/^-+|-+$/gu, '');
+  const leaf = slug(parts.at(-1) ?? '');
+  const parent = slug(parts.at(-2) ?? '');
+  // The parent's first word, because an organization is usually spelled with a
+  // suffix in the id and with the bare name in the model: `deepseek-ai` vs
+  // `DeepSeek-V4.1-Flash`.
+  const parentWord = parent.split('-')[0] ?? '';
+  const redundant = parent.length > 0 && parentWord.length > 0 && leaf.startsWith(parentWord);
+  const source = redundant || parent.length === 0 ? leaf : `${parent}-${leaf}`;
+  return source.length > 0 ? source : slug(String(fallback ?? ''));
 }
 
 /**

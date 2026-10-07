@@ -133,7 +133,7 @@ Source map:
 npm test          # discovers and runs test/*.test.mjs
 ```
 
-61 cases cover failure classification, the health table (including cross-restart persistence and local-day reset), SSE parsing across chunk boundaries, idle timeout and cancellation, attempt planning, the full cascade against local mock endpoints, and reuse — normalization of both modes, delegation, failure translation, catalog projection, id derivation; plus 13 cases that execute the browser half through a minimal React shim (the reuse panel, import deduplication, the mode switch, the stale-route notice).
+66 cases cover failure classification, the health table (including cross-restart persistence and local-day reset), SSE parsing across chunk boundaries, idle timeout and cancellation, attempt planning, the full cascade against local mock endpoints, and reuse — normalization of both modes, delegation, failure translation, catalog projection, id derivation; plus 15 cases that execute the browser half through a minimal React shim (the reuse panel, import deduplication, the mode switch, the stale-route notice).
 
 `test/host.test.mjs` mounts `apply()` against a minimal stub runtime and verifies that `/catalog` projects the **live registry** rather than the configuration, that `/state` reports a candidate whose route has vanished, and that probing a reuse candidate consults the registry instead of dialing. It needs `@deepseek-ai/schemastery`, which ships with the Harness and is not a dependency of this repository, so it **skips with its reason stated** when run from the source tree rather than pretending to fail. To execute it, run inside the profile:
 

@@ -569,9 +569,49 @@ test('resolveModel asks each distinct reused route once', async () => {
 
 test('a reused id keeps the name the operator already knows', () => {
   assert.equal(reuseModelId('space-bunny-free'), 'space-bunny-free');
-  assert.equal(reuseModelId('nvidia/nemotron-3-ultra-550b-a55b:free'), 'nemotron-3-ultra-550b-a55b-free');
+  assert.equal(reuseModelId('nvidia/nemotron-3-ultra-550b-a55b:free'), 'nvidia-nemotron-3-ultra-550b-a55b-free');
+  // The organization is dropped when the leaf already names it, so the clean
+  // spelling survives where it can.
   assert.equal(reuseModelId('deepseek-ai/DeepSeek-V4.1-Flash'), 'deepseek-v4.1-flash');
   assert.equal(reuseModelId('', 'Fallback Name'), 'fallback-name');
+});
+
+test('distinct models never collapse to one id', () => {
+  // The bug this guards: taking only the last path segment made `kilo-auto/free`
+  // and `openrouter/free` both `free`, so the second import was refused as
+  // "already here" although it is a different model. An id collision here is a
+  // silent data-loss bug, not a cosmetic one.
+  const real = [
+    'kilo-auto/free',
+    'openrouter/free',
+    'nvidia/nemotron-3-ultra-550b-a55b:free',
+    'stepfun/step-3.7-flash:free',
+    'deepseek-ai/DeepSeek-V4.1-Flash',
+    'moonshotai/kimi-k3',
+    'z-ai/glm-5.3-flash',
+    'openai/gpt-oss-20b',
+    'inclusionai/ling-3.1-flash',
+    'dots-studio/dots-3-note-preview:free',
+    'liquid/lfm-2.5-2.6b:free',
+    'space-bunny-free',
+    'longcat-2.5-preview-free',
+  ];
+  const ids = real.map((id) => reuseModelId(id));
+  const duplicates = ids.filter((id, index) => ids.indexOf(id) !== index);
+  assert.deepEqual(duplicates, [], `these ids collided: ${duplicates.join(', ')}`);
+  assert.equal(ids.filter((id) => id.length === 0).length, 0, 'every id must be usable');
+});
+
+test('a leaf that is only a generic word still gets its route prefix', () => {
+  assert.equal(reuseModelId('kilo-auto/free'), 'kilo-auto-free');
+  assert.equal(reuseModelId('openrouter/free'), 'openrouter-free');
+  // And the same leaf under different parents stays distinct.
+  assert.notEqual(reuseModelId('kilo-auto/free'), reuseModelId('openrouter/free'));
+});
+
+test('an id with no path separator is left alone', () => {
+  assert.equal(reuseModelId('mimo-v2.6-flash-free'), 'mimo-v2.6-flash-free');
+  assert.equal(reuseModelId('tierflow_pro'), 'tierflow_pro');
 });
 
 test('a candidate id is deterministic, so a second import is detectable', () => {

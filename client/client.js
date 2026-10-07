@@ -413,15 +413,21 @@ window.__ModuleLoader__.load({
     /**
      * The id a reused model takes in this provider's own list.
      *
-     * Mirrors the host's `reuseModelId`: the reused id is already the name the
-     * operator knows, so keeping it means one concept has one name. A leading
-     * `org/` path segment is dropped because a slash is not legal here.
+     * Mirrors the Host's `reuseModelId` exactly — an imported row must get the id
+     * the Host would derive, or the "already imported" check and the saved
+     * configuration would disagree. The parent path segment is kept whenever the
+     * leaf does not already name it, which is what keeps `kilo-auto/free` and
+     * `openrouter/free` distinct instead of both collapsing to `free`.
      */
     function reuseModelId(modelId, fallback) {
       const parts = String(modelId ?? '').trim().split('/').filter((part) => part.length > 0);
-      const tail = parts.length > 0 ? parts[parts.length - 1] : '';
-      const source = tail.length > 0 ? tail : String(fallback ?? '');
-      return source.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+      const slug = (text) => text.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+      const leaf = slug(parts.length > 0 ? parts[parts.length - 1] : '');
+      const parent = slug(parts.length > 1 ? parts[parts.length - 2] : '');
+      const parentWord = parent.split('-')[0] ?? '';
+      const redundant = parent.length > 0 && parentWord.length > 0 && leaf.indexOf(parentWord) === 0;
+      const source = redundant || parent.length === 0 ? leaf : `${parent}-${leaf}`;
+      return source.length > 0 ? source : slug(String(fallback ?? ''));
     }
 
     /** The candidate id one (route, model) pair takes, matching the host's derivation. */

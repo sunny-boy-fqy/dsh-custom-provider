@@ -635,3 +635,76 @@ test('a stale reuse candidate is reported from the state snapshot', async () => 
     globalThis.fetch = previous;
   }
 });
+test('two routes exposing the same generic leaf both import as distinct models', async () => {
+  // `kilo-auto/free` and `openrouter/free` are different models whose last path
+  // segment is identical. If the derived id collapsed to `free`, the second
+  // import would be refused as "already here" and the operator would silently
+  // lose a model — so this is a correctness test, not a naming one.
+  const catalog = {
+    ok: true,
+    self: 'custom',
+    reused: [],
+    total: 2,
+    providers: [
+      { id: 'channel-a', name: 'Channel A', models: [{ id: 'kilo-auto/free', name: 'Kilo Auto Free' }] },
+      { id: 'channel-b', name: 'Channel B', models: [{ id: 'openrouter/free', name: 'OpenRouter Free' }] },
+    ],
+    failures: [],
+  };
+  const { mounted, form, restore } = mountEditor({ catalog });
+  try {
+    mounted.click('cc-reuse-refresh');
+    await settle();
+    // The first route is open; import its model.
+    mounted.click('cc-reuse-import-0-0');
+    // Open the second route and import its model too.
+    mounted.click('cc-reuse-provider-1');
+    assert.equal(mounted.byId('cc-reuse-import-1-0').props.disabled, false, 'a different model must stay importable');
+    mounted.click('cc-reuse-import-1-0');
+
+    mounted.click('cc-save');
+    await settle();
+    const saved = form.mutations[0].ops[0].value;
+    // The id derives from the model, so the two distinct models keep the path
+    // segment that tells them apart. Under the old rule both were `free`.
+    assert.deepEqual(saved.map((model) => model.id), ['high', 'kilo-auto-free', 'openrouter-free']);
+  } finally {
+    restore();
+  }
+});
+
+test('the client derives the same id the host would', async () => {
+  // The two halves both derive ids, and a disagreement would make the "already
+  // imported" check and the saved configuration contradict each other. Assert
+  // them against the host's own implementation rather than a copy of the rule.
+  const host = await import('../src/reuse.js');
+  const samples = [
+    'kilo-auto/free',
+    'openrouter/free',
+    'nvidia/nemotron-3-ultra-550b-a55b:free',
+    'deepseek-ai/DeepSeek-V4.1-Flash',
+    'space-bunny-free',
+    'stepfun/step-3.7-flash:free',
+    'moonshotai/kimi-k3',
+  ];
+  const catalog = {
+    ok: true,
+    self: 'custom',
+    reused: [],
+    total: samples.length,
+    providers: [{ id: 'p', name: 'P', models: samples.map((id) => ({ id, name: id })) }],
+    failures: [],
+  };
+  const { mounted, form, restore } = mountEditor({ catalog });
+  try {
+    mounted.click('cc-reuse-refresh');
+    await settle();
+    mounted.click('cc-reuse-import-all-0');
+    mounted.click('cc-save');
+    await settle();
+    const saved = form.mutations[0].ops[0].value.slice(1).map((model) => model.id);
+    assert.deepEqual(saved, samples.map((id) => host.reuseModelId(id)));
+  } finally {
+    restore();
+  }
+});
