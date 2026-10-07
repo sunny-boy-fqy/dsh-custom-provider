@@ -16,6 +16,9 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { normalizeConfig, usableCandidate, effectiveLimits, reusedProviders, staleReuses } from '../src/normalize.js';
 import { CustomProviderAdapter } from '../src/adapter.js';
@@ -48,18 +51,38 @@ function mixedConfig(extra = {}) {
 }
 
 /**
- * An in-memory health store, so the tests never touch the real state file.
+ * An isolated health store, so the tests never touch the real state file.
  *
  * Each call gets its own path, which matters more than it looks: a quota ban is
  * durable and keyed by `model/candidate`, so two tests that both use
  * `high/borrowed` through one shared file would have the second one silently
  * inherit the first one's ban — and fail in a way that looks like a logic bug.
+ *
+ * The path also carries the process id and is removed on the way out. A per-run
+ * counter alone is not enough: it restarts at 1 in every process, so a *previous*
+ * run's file would be inherited by this one — a flake that shows up only
+ * sometimes, and only on a machine where the suite has already run.
  */
 let healthSeq = 0;
+const healthPaths = [];
 function memoryHealth() {
   healthSeq += 1;
-  return new HealthStore({ path: `/tmp/custom-provider-reuse-test-${healthSeq}.json` });
+  const path = join(tmpdir(), `custom-provider-reuse-${process.pid}-${healthSeq}.json`);
+  // Started from a clean slate, so a name collision cannot import stale health.
+  rmSync(path, { force: true });
+  healthPaths.push(path);
+  return new HealthStore({ path });
 }
+
+process.on('exit', () => {
+  for (const path of healthPaths) {
+    try {
+      rmSync(path, { force: true });
+    } catch {
+      // Best effort: a leftover temp file must never fail the run.
+    }
+  }
+});
 
 /** Collect an async iterable into an array. */
 async function collect(iterable) {
@@ -632,4 +655,49 @@ test('the projection drops models with no id and normalizes modality fields', ()
     self: 'custom',
   });
   assert.deepEqual(view.providers[0].models, [{ id: 'ok', name: 'ok', inputModalities: ['text'] }]);
+});
+test('a reused route that emits text and then fails does not rotate', async () => {
+  // The same invariant the direct path enforces: once the caller has received
+  // text, there is no way to un-send it, so splicing a second attempt onto it
+  // would be worse than the failure. Delegation must not become a way around it.
+  const config = normalizeConfig({
+    providerId: 'custom',
+    models: [{
+      id: 'high',
+      candidates: [
+        { id: 'borrowed', provider: 'our-free-model', model: 'x' },
+        { id: 'direct', baseURL: 'https://gateway.example/v1', apiKey: 'sk', model: 'y' },
+      ],
+    }],
+  });
+  const delegated = [];
+  let directTried = false;
+  const adapter = new CustomProviderAdapter({
+    readConfig: () => config,
+    health: memoryHealth(),
+    streamImpl: async function* () {
+      directTried = true;
+      yield { type: 'text-delta', index: 0, text: 'should not happen' };
+      yield { type: 'finish', reason: { kind: 'stop' } };
+    },
+    streamVia: (provider, model) => {
+      delegated.push(`${provider}/${model}`);
+      return (async function* () {
+        yield { type: 'text-delta', index: 0, text: 'partial answer' };
+        yield { type: 'finish', reason: { kind: 'error', failure: { code: 'SERVER', message: 'upstream died mid-stream' } } };
+      })();
+    },
+  });
+
+  const chunks = await collect(adapter.stream({
+    provider: 'custom',
+    model: 'high',
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+  }));
+
+  assert.deepEqual(delegated, ['our-free-model/x'], 'only the reuse candidate was attempted');
+  assert.equal(directTried, false, 'the next candidate must not be tried after visible output');
+  assert.equal(chunks[0].text, 'partial answer', 'the text already sent stays sent');
+  assert.equal(chunks.at(-1).reason.kind, 'error');
+  assert.equal(chunks.at(-1).reason.failure.code, 'SERVER');
 });
