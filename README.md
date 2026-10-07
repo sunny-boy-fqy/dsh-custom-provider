@@ -42,6 +42,8 @@ The configuration page gained a **Reuse an existing model** section:
 
 What you get is a **reuse candidate**: it records exactly two things — the route id and that route's model id — because the endpoint and the key belong to the route. Importing the same model twice is detected and skipped (the candidate id is derived deterministically from `route-model`).
 
+**How the model id is derived.** The last path segment is slugged; the segment before it (usually the organization) is prefixed as well, *unless* the leaf already repeats it. That keeps one concept under one name without letting different models collide: in the free lane both `kilo-auto/free` and `openrouter/free` end in `free`, so taking the leaf alone would make the second import look like "already imported" and silently drop it — while `deepseek-ai/DeepSeek-V4.1-Flash` already names `deepseek`, so it still yields the clean `deepseek-v4.1-flash`. The browser half derives ids by the same rule, and a test asserts the two agree input for input.
+
 **Why capacities are asked of the owning route.** How many tokens a candidate really accepts is knowable only by the route serving it. A reuse candidate asks its route once through `resolveModelInfo` — a local registry call, no network I/O — and falls back to the configured numbers when the route cannot answer, rather than failing the request over a missing detail.
 
 > **One thing genuinely cannot be borrowed: replay state.** The Harness deliberately strips provider replay envelopes from history whose route belongs to *another* adapter. A reused model therefore sees that conversation as provider-neutral content. That is a capability regression on those turns, never a correctness one.
