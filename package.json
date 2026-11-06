@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-custom-provider",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Custom OpenAI-compatible LLM provider for DeepSeek Harness: one ordered candidate list with per-entry baseURL, API key and upstream model, quota-exhaustion day-ban, and transient-failure cooldown failover.",
   "type": "module",

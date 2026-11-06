@@ -135,18 +135,54 @@ export function assistantMessage(message) {
 }
 
 /**
+ * The tool answers one message carries, in whichever vocabulary it was written.
+ *
+ * Two generations are in the field. V4 makes a tool answer a first-class `tool`
+ * message whose content *is* the result, and V3 wraps the same result in a
+ * `tool-result` block — either on that `tool` message or inside the `user` turn
+ * that follows the call. A projector that reads only bare `text` blocks ships
+ * every tool-using turn upstream with its result empty, and the model answers
+ * "(no output)" without being able to notice the loss.
+ *
+ * @param {any} message - the Harness message.
+ * @returns {Array<{ callId: string, text: string }>} the answers carried, empty when there are none.
+ */
+export function toolAnswersOf(message) {
+  const blocks = Array.isArray(message?.content) ? message.content : [];
+  const wrapped = blocks.filter((block) => block?.type === 'tool-result');
+  if (wrapped.length > 0) {
+    return wrapped.map((block) => ({
+      callId: String(block.toolCallId ?? message?.toolCallId ?? ''),
+      text: flattenText(block.content),
+    }));
+  }
+  if (message?.role !== 'tool') return [];
+  return [{ callId: String(message.toolCallId ?? ''), text: flattenText(message.content) }];
+}
+
+/**
+ * Render one tool answer as the wire's `role: 'tool'` row.
+ *
+ * @param {{ callId: string, text: string }} answer - the answer to render.
+ * @returns {object} the wire message.
+ */
+function toolWireMessage(answer) {
+  return {
+    role: 'tool',
+    tool_call_id: answer.callId,
+    content: answer.text.length > 0 ? answer.text : '(no output)',
+  };
+}
+
+/**
  * Convert one tool-result message.
  *
  * @param {any} message - the Harness tool message.
  * @returns {object} the wire message.
  */
 export function toolMessage(message) {
-  const text = flattenText(message.content);
-  return {
-    role: 'tool',
-    tool_call_id: String(message.toolCallId ?? ''),
-    content: text.length > 0 ? text : '(no output)',
-  };
+  const [answer] = toolAnswersOf(message);
+  return toolWireMessage(answer ?? { callId: String(message?.toolCallId ?? ''), text: '' });
 }
 
 /**
@@ -168,6 +204,11 @@ export async function buildChatPayload(options, io) {
   }
 
   for (const message of options.messages ?? []) {
+    // Answers go out before the role switch: a turn that carries both a result
+    // and follow-up prose must keep the result ahead of that prose, whichever
+    // message the vocabulary put it on.
+    const answers = toolAnswersOf(message);
+    for (const answer of answers) messages.push(toolWireMessage(answer));
     switch (message?.role) {
       case 'system':
       case 'developer': {
@@ -181,12 +222,19 @@ export async function buildChatPayload(options, io) {
         break;
       }
       case 'tool':
-        messages.push(toolMessage(message));
         break;
       case 'user':
-      default:
-        messages.push(await userMessage(message, io));
+      default: {
+        const rest = answers.length > 0 && Array.isArray(message.content)
+          ? { ...message, content: message.content.filter((block) => block?.type !== 'tool-result') }
+          : message;
+        const carried = Array.isArray(rest.content)
+          ? rest.content.length > 0
+          : typeof rest.content === 'string' && rest.content.length > 0;
+        if (!carried) break;
+        messages.push(await userMessage(rest, io));
         break;
+      }
     }
   }
 
