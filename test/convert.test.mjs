@@ -112,11 +112,86 @@ test('a plain user turn is untouched', async () => {
 test('toolAnswersOf reads both vocabularies', () => {
   assert.deepEqual(
     toolAnswersOf({ role: 'tool', toolCallId: 'c1', content: [{ type: 'text', text: 'x' }] }),
-    [{ callId: 'c1', text: 'x' }],
+    [{ callId: 'c1', text: 'x', images: [] }],
   );
   assert.deepEqual(
     toolAnswersOf({ role: 'user', content: [{ type: 'tool-result', toolCallId: 'c2', content: [{ type: 'text', text: 'y' }] }] }),
-    [{ callId: 'c2', text: 'y' }],
+    [{ callId: 'c2', text: 'y', images: [] }],
   );
   assert.deepEqual(toolAnswersOf({ role: 'user', content: [{ type: 'text', text: 'hi' }] }), []);
+});
+
+/** A stand-in request-image reader that yields a fixed one-pixel PNG. */
+const PIXEL = Uint8Array.from(Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+));
+const reader = async () => ({ data: PIXEL, mediaType: 'image/png' });
+
+test('a picture a tool returned reaches the wire as an image part', async () => {
+  const { messages } = await buildChatPayload(
+    { messages: [{
+      role: 'tool',
+      toolCallId: 'c1',
+      content: [
+        { type: 'text', text: 'image/png image, 320x120 px, 1688 bytes' },
+        { type: 'image', attachment: { attachmentId: 'a1', mediaType: 'image/png', bytes: 1688, width: 320, height: 120 } },
+      ],
+    }] },
+    { model: { id: 'test-model' }, maxTokens: 64, readImage: reader },
+  );
+  assert.equal(messages.length, 2);
+  // The text row keeps the metadata, and says the pixels are coming.
+  assert.equal(messages[0].role, 'tool');
+  assert.equal(messages[0].tool_call_id, 'c1');
+  // The picture follows as a user turn, which is where an image part can live.
+  assert.equal(messages[1].role, 'user');
+  const parts = messages[1].content;
+  assert.ok(Array.isArray(parts), 'the follow-up carries parts');
+  assert.equal(parts[0].type, 'text');
+  assert.equal(parts[1].type, 'image_url');
+  assert.match(parts[1].image_url.url, /^data:image\/png;base64,/);
+});
+
+test('an image-only answer still names its call', async () => {
+  const { messages } = await buildChatPayload(
+    { messages: [{
+      role: 'tool',
+      toolCallId: 'c1',
+      content: [{ type: 'image', attachment: { attachmentId: 'a1', mediaType: 'image/png', bytes: 1688, width: 320, height: 120 } }],
+    }] },
+    { model: { id: 'test-model' }, maxTokens: 64, readImage: reader },
+  );
+  assert.equal(messages[0].content, '(see attached image)');
+  assert.equal(messages[1].role, 'user');
+  assert.equal(messages[1].content.filter((part) => part.type === 'image_url').length, 1);
+});
+
+test('a picture stays behind its own tool row in a parallel batch', async () => {
+  const { messages } = await buildChatPayload(
+    { messages: [{
+      role: 'user',
+      content: [
+        { type: 'tool-result', toolCallId: 'c1', content: [{ type: 'text', text: 'one' }] },
+        { type: 'tool-result', toolCallId: 'c2', content: [
+          { type: 'text', text: 'two' },
+          { type: 'image', attachment: { attachmentId: 'a2', mediaType: 'image/png', bytes: 1688, width: 320, height: 120 } },
+        ] },
+      ],
+    }] },
+    { model: { id: 'test-model' }, maxTokens: 64, readImage: reader },
+  );
+  const roles = messages.map((message) => message.role);
+  assert.deepEqual(roles, ['tool', 'tool', 'user']);
+  assert.equal(messages[0].tool_call_id, 'c1');
+  assert.equal(messages[1].tool_call_id, 'c2');
+  assert.match(messages[2].content[0].text, /c2/);
+});
+
+test('a text-only tool answer adds no follow-up turn', async () => {
+  const { messages } = await buildChatPayload(
+    { messages: [{ role: 'tool', toolCallId: 'c1', content: [{ type: 'text', text: 'ALPHA_7' }] }] },
+    { model: { id: 'test-model' }, maxTokens: 64, readImage: reader },
+  );
+  assert.deepEqual(messages, [{ role: 'tool', tool_call_id: 'c1', content: 'ALPHA_7' }]);
 });

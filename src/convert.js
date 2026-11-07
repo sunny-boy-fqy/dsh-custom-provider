@@ -144,33 +144,44 @@ export function assistantMessage(message) {
  * every tool-using turn upstream with its result empty, and the model answers
  * "(no output)" without being able to notice the loss.
  *
+ * Image blocks are carried out too, for the same reason: `read_image` answers
+ * with a picture, and a text-only projection leaves the model holding the
+ * metadata line and no pixels. It then reports exactly that — that the tool
+ * returned a path and a size but nothing it can look at.
+ *
  * @param {any} message - the Harness message.
- * @returns {Array<{ callId: string, text: string }>} the answers carried, empty when there are none.
+ * @returns {Array<{ callId: string, text: string, images: Array<unknown> }>} the answers carried, empty when there are none.
  */
 export function toolAnswersOf(message) {
   const blocks = Array.isArray(message?.content) ? message.content : [];
   const wrapped = blocks.filter((block) => block?.type === 'tool-result');
+  const answerOf = (content, callId) => {
+    const parts = Array.isArray(content) ? content : [];
+    return {
+      callId,
+      text: flattenText(parts),
+      images: parts.filter((block) => block?.type === 'image' && block.offloaded !== true),
+    };
+  };
   if (wrapped.length > 0) {
-    return wrapped.map((block) => ({
-      callId: String(block.toolCallId ?? message?.toolCallId ?? ''),
-      text: flattenText(block.content),
-    }));
+    return wrapped.map((block) => answerOf(block.content, String(block.toolCallId ?? message?.toolCallId ?? '')));
   }
   if (message?.role !== 'tool') return [];
-  return [{ callId: String(message.toolCallId ?? ''), text: flattenText(message.content) }];
+  return [answerOf(message.content, String(message.toolCallId ?? ''))];
 }
 
 /**
  * Render one tool answer as the wire's `role: 'tool'` row.
  *
- * @param {{ callId: string, text: string }} answer - the answer to render.
+ * @param {{ callId: string, text: string, images?: Array<unknown> }} answer - the answer to render.
  * @returns {object} the wire message.
  */
 function toolWireMessage(answer) {
+  const hasImages = Array.isArray(answer.images) && answer.images.length > 0;
   return {
     role: 'tool',
     tool_call_id: answer.callId,
-    content: answer.text.length > 0 ? answer.text : '(no output)',
+    content: answer.text.length > 0 ? answer.text : hasImages ? '(see attached image)' : '(no output)',
   };
 }
 
@@ -198,6 +209,31 @@ export function toolMessage(message) {
  */
 export async function buildChatPayload(options, io) {
   const messages = [];
+  // `role: 'tool'` carries text only, so a picture a tool returned travels as
+  // the user turn after it — the split the kernel's own adapter makes, and the
+  // reason a `read_image` result is not silently reduced to its metadata line.
+  // Queued rather than pushed: follow-ups for one turn must stay behind every
+  // tool row of that turn, including across a parallel batch.
+  const followUp = [];
+  const flushFollowUp = async () => {
+    while (followUp.length > 0) {
+      const parts = followUp.shift();
+      messages.push({ role: 'user', content: await parts });
+    }
+  };
+  /** The wire parts for one answer's images, or undefined when it carried none. */
+  const imagePartsOf = async (answer) => {
+    const images = Array.isArray(answer.images) ? answer.images : [];
+    if (images.length === 0) return undefined;
+    const parts = [];
+    for (const block of images) {
+      parts.push(await imagePart(block, io.readImage, io.signal));
+    }
+    return [
+      { type: 'text', text: `The result of tool call ${answer.callId} is ${parts.length} image(s), attached below.` },
+      ...parts,
+    ];
+  };
 
   if (typeof options.system === 'string' && options.system.length > 0) {
     messages.push({ role: 'system', content: options.system });
@@ -208,7 +244,12 @@ export async function buildChatPayload(options, io) {
     // and follow-up prose must keep the result ahead of that prose, whichever
     // message the vocabulary put it on.
     const answers = toolAnswersOf(message);
-    for (const answer of answers) messages.push(toolWireMessage(answer));
+    if (answers.length === 0) await flushFollowUp();
+    for (const answer of answers) {
+      messages.push(toolWireMessage(answer));
+      const parts = await imagePartsOf(answer);
+      if (parts !== undefined) followUp.push(parts);
+    }
     switch (message?.role) {
       case 'system':
       case 'developer': {
@@ -248,6 +289,8 @@ export async function buildChatPayload(options, io) {
         parameters: tool.parameters ?? { type: 'object', properties: {} },
       },
     }));
+
+  await flushFollowUp();
 
   return {
     messages,
